@@ -94,6 +94,11 @@
           <Order>5</Order><Description>pvmpower devnode</Description>
           <CommandLine>cmd /c if exist C:\DroidVM\pvmpower-devnode.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\pvmpower-devnode.ps1</CommandLine>
         </SynchronousCommand>
+        <!-- 電源：永不睡眠、永不關螢幕（AC+DC 都設 Never）。 -->
+        <SynchronousCommand wcm:action="add">
+          <Order>6</Order><Description>power: never sleep / never turn off display</Description>
+          <CommandLine>cmd /c powercfg /change standby-timeout-ac 0 &amp; powercfg /change standby-timeout-dc 0 &amp; powercfg /change monitor-timeout-ac 0 &amp; powercfg /change monitor-timeout-dc 0</CommandLine>
+        </SynchronousCommand>
       </FirstLogonCommands>
     </component>
 
