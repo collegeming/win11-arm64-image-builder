@@ -1,0 +1,257 @@
+name: Build Windows 11 ARM64 image for DroidVM
+
+# Builds a bootable, driver-injected Windows 11 ARM64 qcow2/.vmpkg for DroidVM from the
+# official Microsoft ISO, with optional Chinese (zh-CN) support and tiny11-style debloat.
+#
+# The ISO is fetched with Fido straight from Microsoft's own software-download API, so it is
+# always the current release - no browser step and no time-limited link to babysit.
+#
+# RUNNER CHOICE
+#   Needs ~50 GB scratch: 8.5 GB ISO + ~20 GB expandable VHDX + ~14 GB qcow2, plus a few GB
+#   more if the ISO ships install.esd and an edition must be exported first.
+#     windows-2022                  -> keeps a ~147 GB D: drive. USE THIS.
+#     windows-2025 / windows-latest -> only ~32 GB on C:. Will run out of space.
+#   `runner` accepts any label, so a larger hosted runner works too.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_lang:
+        description: 'ISO language (Chinese (Simplified) = zh-CN, the native-Chinese route)'
+        required: true
+        default: 'Chinese (Simplified)'
+      win_release:
+        description: 'Windows 11 release for Fido -Rel (e.g. 26H2, 25H2, Latest)'
+        required: true
+        default: '26H2'
+      runner:
+        description: 'Runner label (windows-2022 keeps its large D: drive)'
+        required: true
+        default: 'windows-2022'
+      image_index:
+        description: 'install.wim edition index; 0 = auto-pick "Windows 11 Pro"'
+        required: true
+        default: '0'
+      disk_size_mb:
+        description: 'Guest disk size in MB'
+        required: true
+        default: '40960'
+      dvm_username:
+        description: 'Guest account name'
+        required: true
+        default: 'USER'
+      dvm_password:
+        description: 'Guest password (blank breaks RDP/SSH logon)'
+        required: true
+        default: 'DroidVM'
+      dvm_locale:
+        description: 'UI locale for unattend.xml (zh-CN to match a zh-CN ISO, else en-US)'
+        required: true
+        default: 'zh-CN'
+      debloat_level:
+        description: 'tiny11 debloat: standard (curated) | minimal (also strip other provisioned apps) | off'
+        required: true
+        default: 'standard'
+      keep_cjk:
+        description: 'Preserve CJK fonts / IME / language features (true = Chinese works properly)'
+        required: true
+        default: 'true'
+      ssh_pubkey:
+        description: 'Optional SSH public key for the guest (blank = password login only)'
+        required: false
+        default: ''
+      ems_sac:
+        description: 'EMS/SAC console: skip | online (first boot pulls it from Windows Update)'
+        required: true
+        default: 'online'
+      compress_qcow2:
+        description: 'zstd-compress qcow2 clusters: 1 = smaller, 0 = plain'
+        required: true
+        default: '0'
+      publish_release:
+        description: 'Publish the split parts as a GitHub Release (true/false)'
+        required: true
+        default: 'true'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner }}
+    timeout-minutes: 240
+
+    env:
+      ISO_LANG:        ${{ github.event.inputs.iso_lang }}
+      WIN_RELEASE:     ${{ github.event.inputs.win_release }}
+      IMAGE_INDEX:     ${{ github.event.inputs.image_index }}
+      DISK_SIZE_MB:    ${{ github.event.inputs.disk_size_mb }}
+      DVM_USERNAME:    ${{ github.event.inputs.dvm_username }}
+      DVM_PASSWORD:    ${{ github.event.inputs.dvm_password }}
+      DROIDVM_LOCALE:  ${{ github.event.inputs.dvm_locale }}
+      DROIDVM_DEBLOAT_LEVEL: ${{ github.event.inputs.debloat_level }}
+      DROIDVM_KEEP_CJK: ${{ github.event.inputs.keep_cjk }}
+      SSH_PUBKEY:      ${{ github.event.inputs.ssh_pubkey }}
+      EMS_SAC_SOURCE:  ${{ github.event.inputs.ems_sac }}
+      COMPRESS:        ${{ github.event.inputs.compress_qcow2 }}
+      PUBLISH_RELEASE: ${{ github.event.inputs.publish_release }}
+
+    steps:
+      - name: Preflight (elevation + free space)
+        shell: pwsh
+        run: |
+          $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+                   ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Host "runner : $env:RUNNER_NAME / $env:RUNNER_OS"
+          Write-Host "admin  : $admin"
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | Format-Table -AutoSize
+
+          # diskpart / Mount-DiskImage / DISM need elevation.
+          if (-not $admin) { throw "Runner is not elevated; the build needs Administrator." }
+
+          # Park all large artefacts on the roomiest drive (D: on windows-2022).
+          $best = Get-PSDrive -PSProvider FileSystem |
+                  Where-Object { $_.Free -gt 0 -and $_.Name -match '^[A-Z]$' } |
+                  Sort-Object Free -Descending | Select-Object -First 1
+          $workRoot = "$($best.Name):\droidvm-build"
+          New-Item -ItemType Directory -Force $workRoot | Out-Null
+          "WORK_ROOT=$workRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $free = [math]::Round($best.Free/1GB,1)
+          Write-Host "WORK_ROOT=$workRoot ($free GB free)"
+          if ($best.Free -lt 60GB) {
+            throw "Only $free GB free on $($best.Name): - the build needs ~50 GB. Use windows-2022 or a larger runner."
+          }
+
+      # The fork IS the builder, so a plain checkout brings build.ps1 and debloat-tiny11.ps1.
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Ensure qemu-img
+        shell: pwsh
+        run: |
+          $qemuDir = Join-Path $env:ProgramFiles 'qemu'
+          $img = Join-Path $qemuDir 'qemu-img.exe'
+          if (-not (Test-Path $img) -and -not (Get-Command qemu-img -ErrorAction SilentlyContinue)) {
+            choco install qemu -y --no-progress
+          }
+          if (Test-Path $qemuDir) {
+            "$qemuDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            $env:PATH = "$qemuDir;$env:PATH"
+          }
+          if (-not (Get-Command qemu-img -ErrorAction SilentlyContinue)) { throw "qemu-img not found" }
+          qemu-img --version
+
+      - name: Resolve and download the official ISO
+        shell: pwsh
+        run: |
+          # Fido queries Microsoft's software-download API for the current retail links.
+          # The URL is signed and short-lived, so resolve + download in one step.
+          $fido = Join-Path $env:WORK_ROOT 'Fido.ps1'
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/pbatard/Fido/master/Fido.ps1' -OutFile $fido
+
+          $url = & $fido -Win 11 -Rel $env:WIN_RELEASE -Ed 'Windows 11 Home/Pro/Edu' `
+                   -Lang $env:ISO_LANG -Arch ARM64 -GetUrl |
+                 Where-Object { $_ -match '^https?://' } | Select-Object -Last 1
+          if (-not $url) { throw "Fido returned no ARM64 URL for '$env:ISO_LANG' / '$env:WIN_RELEASE'" }
+          # Log only the filename: the URL carries a signature.
+          Write-Host ("resolved: {0}" -f (($url -split '\?')[0] -split '/')[-1])
+
+          $isoDir = Join-Path $env:WORK_ROOT 'iso'
+          New-Item -ItemType Directory -Force $isoDir | Out-Null
+          $iso = Join-Path $isoDir 'win11-arm64.iso'
+          & curl.exe -L --fail --retry 5 --retry-delay 10 --retry-all-errors -C - -o $iso $url
+          if ($LASTEXITCODE -ne 0) { throw "curl failed ($LASTEXITCODE)" }
+
+          $len = (Get-Item $iso).Length
+          Write-Host ("downloaded {0:N2} GB" -f ($len/1GB))
+          if ($len -lt 3GB) { throw "ISO looks truncated ($len bytes)" }
+          "SRC_ISO=$iso" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Patch install.esd support (idempotent)
+        shell: pwsh
+        run: |
+          # Already committed in this fork; re-running is a no-op unless upstream changed.
+          $p = "$env:GITHUB_WORKSPACE\scripts\patch-esd-support.ps1"
+          if (Test-Path $p) {
+            & $p -BuildPs1 "$env:GITHUB_WORKSPACE\windows\build.ps1"
+          } else {
+            Write-Host "patch script absent; assuming build.ps1 already handles install.esd"
+          }
+
+      - name: Resolve image index
+        shell: pwsh
+        run: |
+          # CI cannot answer build.ps1's interactive edition prompt.
+          $idx = $env:IMAGE_INDEX
+          if (-not $idx -or [int]$idx -le 0) {
+            $idx = & "$env:GITHUB_WORKSPACE\scripts\resolve-image-index.ps1" `
+                     -IsoPath $env:SRC_ISO -Match '^Windows 11 Pro$' |
+                   Where-Object { $_ -match '^\d+$' } | Select-Object -Last 1
+            if (-not $idx) { throw "could not resolve an image index" }
+          }
+          Write-Host "IMAGE_INDEX=$idx"
+          "IMAGE_INDEX=$idx"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ESD_IMAGE_INDEX=$idx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build image
+        shell: powershell
+        env:
+          # Boot-critical viostor/vioscsi must be injected or the image will not boot.
+          DRIVER_INSTALL: 'NetKVM rdmapool pvmpower vioinput viostor vioscsi viosnd viofs'
+          QEMU_IMG_INSTALL: '1'
+          VMPKG_COMPRESSION: 'auto'
+        run: |
+          $out = Join-Path $env:WORK_ROOT 'out'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $env:OUT_QCOW  = Join-Path $out 'win11-arm64-droidvm.qcow2'
+          $env:OUT_VMPKG = Join-Path $out 'win11-arm64-droidvm.vmpkg'
+          $env:VMS_JSON  = "$env:GITHUB_WORKSPACE\vms.json"
+          # DROIDVM_DEBLOAT=off skips the tiny11 pass entirely.
+          if ($env:DROIDVM_DEBLOAT_LEVEL -eq 'off') { $env:DROIDVM_DEBLOAT = '0' }
+
+          Write-Host "locale=$env:DROIDVM_LOCALE debloat=$env:DROIDVM_DEBLOAT_LEVEL keepCjk=$env:DROIDVM_KEEP_CJK"
+          & "$env:GITHUB_WORKSPACE\windows\build.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited $LASTEXITCODE" }
+
+          $q = $env:OUT_QCOW
+          if (-not (Test-Path $q)) { throw "no qcow2 produced at $q" }
+          Write-Host ("qcow2: {0:N2} GB" -f ((Get-Item $q).Length/1GB))
+          qemu-img info $q
+
+      - name: Split output for GitHub limits
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:WORK_ROOT 'out'
+          $parts = Join-Path $env:WORK_ROOT 'parts'
+          $files = @(Get-ChildItem -LiteralPath $out -File | Where-Object { $_.Extension -in '.qcow2','.vmpkg' })
+          if (-not $files) { throw "nothing to split in $out" }
+          foreach ($f in $files) {
+            & "$env:GITHUB_WORKSPACE\scripts\split-file.ps1" -Path $f.FullName -OutDir $parts -PartSizeMB 1900
+          }
+          Get-ChildItem $parts | Select-Object Name,@{n='GB';e={[math]::Round($_.Length/1GB,2)}} | Format-Table -AutoSize
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win11-arm64-droidvm
+          path: ${{ env.WORK_ROOT }}/parts/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish release
+        if: ${{ github.event.inputs.publish_release == 'true' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $parts = Join-Path $env:WORK_ROOT 'parts'
+          $tag = "win11-$env:WIN_RELEASE-arm64-$(Get-Date -Format yyyyMMdd-HHmmss)"
+          $files = @(Get-ChildItem -LiteralPath $parts | ForEach-Object { $_.FullName })
+          # Release assets cap at 2 GB, hence the ~1.9 GB parts.
+          & gh release create $tag @files `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --title "Windows 11 $env:WIN_RELEASE ARM64 for DroidVM ($env:ISO_LANG)" `
+              --notes "Built from the official Microsoft Windows 11 ARM64 ISO ($env:WIN_RELEASE, $env:ISO_LANG) with DroidVM's modified VirtIO drivers injected. Debloat=$env:DROIDVM_DEBLOAT_LEVEL, keepCjk=$env:DROIDVM_KEEP_CJK, locale=$env:DROIDVM_LOCALE. Reassemble with scripts/join-files.ps1 then import the .vmpkg in DroidVM."
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }

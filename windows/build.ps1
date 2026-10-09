@@ -332,8 +332,23 @@ try {
     Show-CommandLine "Mount-DiskImage" @("-ImagePath", $SRC_ISO, "-PassThru")
     $mr = Mount-DiskImage -ImagePath $SRC_ISO -PassThru; $isoMounted = $true
     $isoLetter = ($mr | Get-Volume).DriveLetter
+    # DROIDVM-ESD-HANDLING: Microsoft's public ARM64 ISO may ship install.esd instead of
+    # install.wim. Export the requested edition to a real wim in the scratch dir so the
+    # rest of the build (dism /Apply-Image, /Add-Driver) is unchanged.
     $wim = "${isoLetter}:\sources\install.wim"
-    if (-not (Test-Path $wim)) { throw "$wim not found in ISO" }
+    if (-not (Test-Path $wim)) {
+        $esd = "${isoLetter}:\sources\install.esd"
+        if (-not (Test-Path $esd)) { throw "neither install.wim nor install.esd found in ISO ($isoLetter`:\sources\)" }
+        $esdIdx = 0
+        if ($env:ESD_IMAGE_INDEX) { [void][int]::TryParse($env:ESD_IMAGE_INDEX, [ref]$esdIdx) }
+        if ($esdIdx -le 0) {
+            throw "ISO ships install.esd and ESD_IMAGE_INDEX is not set. Set it to the edition index to export (0 = auto-pick 'Windows 11 Pro')."
+        }
+        Write-Host "[iso] install.esd -> exporting index $esdIdx to install.wim ..."
+        $wim = Join-Path $WORK "install.wim"
+        Export-WindowsImage -SourceImagePath $esd -SourceIndex $esdIdx -DestinationImagePath $wim -CompressionType Max -CheckIntegrity
+        Write-Host "[iso] exported $wim ($('{0:N1} GB' -f ((Get-Item $wim).Length / 1GB)))"
+    }
     Write-Host "[iso] $SRC_ISO"
     $IMAGE_INDEX = Resolve-ImageIndex $wim $IMAGE_INDEX
     Write-Host "[image] using index $IMAGE_INDEX"
@@ -439,16 +454,27 @@ exit
     }
 
     # === 6) Debloat (offline removal of provisioned Appx) ===
-    Write-Host "[debloat] removing extra provisioned Appx offline ..."
-    $keep = 'VCLibs|NET\.Native|UI\.Xaml|Store|SecHealth|Photos|Notepad|Terminal|WindowsTerminal'
-    try {
-        Get-AppxProvisionedPackage -Path "$W\" | Where-Object { $_.DisplayName -notmatch $keep } | ForEach-Object {
+    # Upstream removed every provisioned app not matching a tiny keep-list. That is unsafe for a
+    # zh-CN image: it strips CJK fonts' companions, language features and the IME payload, which is
+    # why "tiny11 + Chinese" has the reputation of showing boxes. The tiny11 port lives in
+    # debloat-tiny11.ps1, whose keep-list protects CJK by default and mirrors ntdevlabs/tiny11builder
+    # for what actually gets removed. DROIDVM_DEBLOAT=0 disables it and falls back to nothing.
+    if ($env:DROIDVM_DEBLOAT -and $env:DROIDVM_DEBLOAT -match '^(0|false|no|off)$') {
+        Write-Host "[debloat] disabled via DROIDVM_DEBLOAT" -ForegroundColor DarkYellow
+    } else {
+        $tiny11 = Join-Path $HERE "debloat-tiny11.ps1"
+        if (Test-Path $tiny11) {
+            $keepCjk = -not ($env:DROIDVM_KEEP_CJK -and $env:DROIDVM_KEEP_CJK -match '^(0|false|no|off)$')
+            $level = if ($env:DROIDVM_DEBLOAT_LEVEL) { $env:DROIDVM_DEBLOAT_LEVEL } else { 'standard' }
             try {
-                Show-CommandLine "Remove-AppxProvisionedPackage" @("-Path", "$W\", "-PackageName", $_.PackageName)
-                Remove-AppxProvisionedPackage -Path "$W\" -PackageName $_.PackageName | Out-Null
-            } catch {}
+                & $tiny11 -MountDir "$W\" -Level $level -KeepCjk:$keepCjk
+            } catch {
+                Write-Host "  (tiny11 debloat failed, continuing: $($_.Exception.Message))" -ForegroundColor DarkYellow
+            }
+        } else {
+            Write-Host "  (debloat-tiny11.ps1 not found; skipping debloat)" -ForegroundColor DarkYellow
         }
-    } catch { Write-Host "  (skipping debloat: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+    }
 
     # === 6b) Offline shrink: WinSxS ResetBase + disable hibernate ===
     # Mirrors the macOS debloat's WinSxS compaction and hibernate disable, here using the offline version (no boot needed).
@@ -539,11 +565,27 @@ exit
     Show-CommandLine "New-Item" @("-ItemType", "Directory", "-Force", "$W\Windows\Panther")
     New-Item -ItemType Directory -Force "$W\Windows\Panther" | Out-Null
     $unattendSrc = Join-Path $HERE "unattend.xml"
-    # Inject account/password (@@USERNAME@@ / @@PASSWORD@@ tokens). XML-escape keeps the XML valid when the credentials contain &<>"
-    # (mirrors the macOS perl version). Write UTF-8 without BOM via .NET, matching the original file.
+    # Inject account/password (@@USERNAME@@ / @@PASSWORD@@ tokens) and the UI locale.
+    # The locale must match the ISO: a zh-CN image with <UILanguage>en-US</UILanguage> comes up
+    # half-translated (English shell chrome over Chinese resources). DROIDVM_LOCALE drives both
+    # UILanguage/SystemLocale/UserLocale and the InputLocale keyboard id, so a zh-CN build gets
+    # the Chinese UI plus the Chinese (Simplified) keyboard layout by default.
+    # XML-escape keeps the XML valid when values contain &<>" (mirrors the macOS perl version).
+    # Write UTF-8 without BOM via .NET, matching the original file.
     $esc = { param($s) $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;') }
-    $unattendXml = (Get-Content $unattendSrc -Raw).Replace('@@USERNAME@@', (& $esc $USERNAME)).Replace('@@PASSWORD@@', (& $esc $PASSWORD))
-    Show-CommandLine "Set-Content" @("$W\Windows\Panther\unattend.xml", "(unattend.xml + password)")
+    $locale = if ($env:DROIDVM_LOCALE) { $env:DROIDVM_LOCALE } else { "en-US" }
+    # Keyboard layout ids: 0409:00000409 = en-US/US, 0804:00000804 = zh-CN/Chinese (Simplified).
+    $inputLocale = if ($env:DROIDVM_INPUT_LOCALE) { $env:DROIDVM_INPUT_LOCALE }
+                   elseif ($locale -match '^zh-CN') { "0804:00000804" }
+                   elseif ($locale -match '^zh-TW') { "0404:00000404" }
+                   else { "0409:00000409" }
+    Write-Host "[oobe] locale=$locale inputLocale=$inputLocale"
+    $unattendXml = (Get-Content $unattendSrc -Raw).
+        Replace('@@USERNAME@@', (& $esc $USERNAME)).
+        Replace('@@PASSWORD@@', (& $esc $PASSWORD)).
+        Replace('@@LOCALE@@', (& $esc $locale)).
+        Replace('@@INPUTLOCALE@@', (& $esc $inputLocale))
+    Show-CommandLine "Set-Content" @("$W\Windows\Panther\unattend.xml", "(unattend.xml + password + locale)")
     [System.IO.File]::WriteAllText("$W\Windows\Panther\unattend.xml", $unattendXml, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "[oobe] unattend.xml placed (first boot creates USER, autologon, imports certs)"
 
