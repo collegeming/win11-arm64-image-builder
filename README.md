@@ -1,119 +1,89 @@
-# win11-arm64-image-builder
+# Windows 11 ARM64 镜像构建器：DroidVM 中文分支
 
-把 **Win11 ARM64 ISO + 自簽 gunyah/virtio 驅動**全自動建成一顆可直接在 **DroidVM（Gunyah/crosvm）上開機的 qcow2**。
+本分支基于 [Droid-VM/win11-arm64-image-builder](https://github.com/Droid-VM/win11-arm64-image-builder)，使用微软官方 ARM64 ISO 和 DroidVM 修改版 Gunyah/VirtIO 驱动，生成 `.qcow2` 磁盘和可导入的 `.vmpkg`。主要路径是在 x64 Windows 上用 DISM 离线构建，支持简体中文资源保留和可选精简。
 
-產物預設:本機帳號 `USER`(自動登入、密碼永不過期)、testsigning + nointegritychecks 已開、驅動已裝、SSH/RDP 已開、已 debloat(含關閉 Windows Update,桌面有 `enable_windows_update.bat` 可開回)、永不睡眠 / 永不關螢幕、停用 Reserved Storage、IPv6 SLAAC 用 EUI-64(位址可由 MAC 推算)。
+**构建目标为 Windows 11 Pro 26H2、26300.9550（KB5124010）；这不是已验证结果。** 已有手机启动证据来自 Home 26H2、26300.9457，不能据此宣称新 Pro 镜像或目标补丁已通过验证。本文件是本分支的权威概览；[K70 Pro 验证记录](docs/k70pro.md)列出证据与限制，[英文入口](README.zh-fork.md)仅提供导航。
 
-## 兩條路線(二選一,產物等價)
+## 目标与验收边界
 
-| 路線 | 環境 | 入口 | 做法 | 時間 |
-|---|---|---|---|---|
-| **A. Windows** | 單台 x64 Windows(系統管理員) | `windows_build.ps1` | DISM 離線套用映像 + 離線注入驅動 + bcdboot/bcdedit;不跑 Setup、不開 VM | ~5–10 分 |
-| **B. macOS** | 單台 Apple Silicon Mac | `macos_build.sh` | qemu HVF 跑 Setup 裝機 + 裝驅動,再 `sysprep /generalize` 打回可部署狀態 | ~30 分 |
+| 项目 | 要求 / 证据 |
+|---|---|
+| 系统版本 | 目标 `26H2`，由 `windows/updates.json` 指定 |
+| 系统构建号 | 目标 `26300.9550`，由 `windows/updates.json` 指定 |
+| 版本选择 | 按映像元数据 `EditionID=Professional`、`Architecture=12`（ARM64）选择；匹配不唯一必须停止，不能回退到索引 1 |
+| 更新包 | 必须使用 KB5124010 的官方 ARM64 包及所需前置包；在应用系统映像之后、`ResetBase` 之前安装 |
+| 构建证据 | `image-metadata.json` 必须记录实际版本、EditionID、架构、构建号和更新包状态；实际值不能用目标值代填 |
+| 待重启状态 | 如离线更新仍 pending，必须明确记录；首次启动并完成更新后，再核对实际构建号和包状态 |
+| 手机验证 | Pro 与精确构建号 `26300.9550` 尚未验证；不能仅凭构建成功、文件名或 Release 标题判定通过 |
 
-兩條路線都把映像做成 **OOBE-pending(尚未完成首次設定)**:真正的「第一次開機」發生在 **Gunyah 目標機**上,由它全新偵測硬體並安裝驅動 —— 尤其把 `rdmapool` 綁到目標機才有的 `ACPI\RDMA0000`(受保護 VM 的 restricted-DMA pool),讓 `viostor` 的 DMA 走 bounce、不打到 lent 記憶體。這是驅動能在開機階段正確載入的關鍵。
+以上是新 Pro 构建的验收要求。下载时必须核对对应产物的元数据；未提供元数据或仍处于待验证状态的产物，不应视为已满足目标。
 
-> **產物功能等價,但體積不同**:路線 B(macOS)約 **7 GB**,路線 A(Windows)約 **14 GB**。差在回收可用空間的方式 —— macOS 流程在 qemu 執行期即時 TRIM(`discard=unmap`)並線上 debloat,壓得較實;想更小可走 macOS。開 `COMPRESS=1`(qcow2 **zstd** 壓縮叢集)後路線 A 實測 **4.7 GB**;新版 crosvm 可直讀 zstd 叢集,匯入後不必解壓即可開機(zlib 的 `-c` crosvm 讀不了,builder 不再產出)。
+## 构建
 
-## 用法
+### GitHub Actions
 
-兩邊都是「改入口腳本頂部的變數 → 執行」。
+在 Actions 中运行 **Build Windows 11 Pro 26H2 ARM64 for DroidVM**。关键输入如下；更新包地址、SHA256 和精确目标版本由 `windows/updates.json` 固定。
+
+| 输入 | 建议值 / 含义 |
+|---|---|
+| `iso_lang` / `dvm_locale` | `Chinese (Simplified)` / `zh-CN`；语言设置应当与 ISO 一致 |
+| `win_release` | `26H2`；ISO 的原始构建号不等于更新后的目标构建号 |
+| `image_index` | `0` 自动选择 Pro ARM64；指定索引也必须通过版本与架构校验 |
+| `runner` | `windows-2022` 或有足够空间的 Windows runner；以预检结果为准 |
+| `debloat_level` / `keep_cjk` | `standard` / `true`，保留中文字体、输入法及语言资源 |
+| `ems_sac` | 无网络测试可选 `skip`；`online` 需要来宾首次启动时联网获取交互式 SAC 组件 |
+| `publish_release` | 是否发布分片；发布不等于手机启动验证 |
+
+工作流通过 [Fido](https://github.com/pbatard/Fido)解析微软官方下载地址。必须检查 ISO、官方更新包与最终镜像的实际信息，不应把“下载当前 ISO”当作达到 `26300.9550` 的保证。
+
+### 本地 x64 Windows
+
+需要管理员权限、内置 DISM / bcdboot / diskpart，以及 `qemu-img`。准备官方 ARM64 ISO、修改版驱动和更新包，并预留足够空间供 ISO、VHDX、转换输出及 ESD 导出使用。
+
+编辑 `windows_build.ps1` 顶部的配置后，在仓库目录运行：
 
 ```powershell
-# 路線 A(Windows,會自動提權)
-powershell -ExecutionPolicy Bypass -File windows_build.ps1
-```
-```bash
-# 路線 B(macOS)
-bash macos_build.sh
+powershell -ExecutionPolicy Bypass -File .\windows_build.ps1
 ```
 
-## 設定(入口腳本裡的變數)
+入口脚本会设置自己的环境变量，不能假定在外部设置的同名值会保留。主要配置包括 `SRC_ISO`、`DRIVERS_DIR`、`DRIVER_INSTALL`、`DRIVER_CERT`、`OUT_QCOW`、`OUT_VMPKG`、`DVM_USERNAME` 和 `DVM_PASSWORD`；新 Pro 构建还必须满足上表的目标和更新要求。
 
-檔案類變數(`SRC_ISO` / `DRIVERS_DIR` / `OPENSSH_SRC`)可填 **URL**(自動下載到 `files/`)或**本地路徑**;zip 自動解壓。
+[windows/README.md](windows/README.md)保留上游离线构建、驱动和 EMS/SAC 细节，其中的体积、默认配置及功能描述不代表本分支的实测承诺。`macos_build.sh` 和 [macos/](macos/)是保留的上游实验路径，**本分支未验证其中文、Pro 选择、KB5124010 更新或与 Windows 路径的产物等价性**。
 
-| 變數 | 說明 |
+## 中文保留与精简
+
+简体中文应当使用官方 zh-CN ISO，并设置 `DROIDVM_LOCALE=zh-CN`、`DROIDVM_KEEP_CJK=1`。中文保留策略保护 CJK 字体、IME、`InputMethod\CHS` / `CHT` 和语言功能；这不等于所有应用和输入功能均已实测。
+
+| 级别 | 行为 |
 |---|---|
-| `SRC_ISO` | **必填**。Win11 ARM64 ISO(URL 或路徑) |
-| `DRIVERS_DIR` | 驅動來源:GitHub release zip URL / 本地 zip / 本地資料夾。預設抓 `gunyah-guest-drivers-windows` 的 `dev` release |
-| `DRIVER_INSTALL` | 只安裝這些驅動子資料夾(預設 `NetKVM rdmapool pvmpower vioinput viostor vioscsi`;必須含開機碟 `viostor`) |
-| `DRIVER_CERT` | 簽章憑證(空 = 從驅動 `.cat` 自動萃取) |
-| `IMAGE_INDEX` | install.wim 版本索引(空 = 列出讓你選) |
-| `USERNAME` / `PASSWORD` | 建立的本機管理員帳號。macOS 用 `USERNAME` / `PASSWORD`;Windows 用 `$env:DVM_USERNAME` / `$env:DVM_PASSWORD` |
-| `SSH_PUBKEY` | SSH 公鑰(空 = 只密碼登入) |
-| `OUT_QCOW` | 輸出 qcow2 路徑 |
-| `EMS_SAC_SOURCE` | 互動式 `SAC>` 執行期 FoD 從哪來:**`skip`**(預設,只出 boot-EMS)/ **`online`**(路線 A 於**目標端首次開機**連網裝;路線 B 於**構建期** qemu VM 內連網裝並烙入,目標端免連網)/ **`E:\`**(ARM64 FoD ISO 掛載點/資料夾,**僅路線 A**,離線 `dism /Add-Capability` 烙進映像、全程零連網)。見下方 EMS/SAC |
+| `standard` | 按维护的列表移除应用，建议作为起点 |
+| `minimal` | 进一步移除未受保护的预配应用，必须检查所需功能是否保留 |
+| `off` | 关闭 tiny11 风格应用精简；本地构建还应设置 `DROIDVM_DEBLOAT=0` |
 
-## EMS / SAC(序列 out-of-band 主控台,`SAC>`)
+这些级别不承诺关闭其他镜像配置步骤。精简模块保留组件存储，不采用 tiny11 Core 的组件存储删除方式；首次登录脚本另有服务调整，可能关闭 Windows Update，桌面提供 `enable_windows_update.bat`。组件存在与更新服务已启用是两件事。
 
-讓成品開機即可用 **Emergency Management Services**:在 app 的 SBSA 序列埠上得到 Windows `SAC>` 互動主控台。**BCD EMS 一律自動烙入**(`emssettings BIOS` + `ems on` + `bootems on`),所以開機序列文字永遠有;差別只在**互動式 `SAC>` 執行期**(`Windows.Desktop.EMS-SAC.Tools` FoD,LTSC/Pro ARM64 不內含)怎麼來:
+## 下载、校验与导入
 
-| | 路線 A(Windows) | 路線 B(macOS) |
-|---|---|---|
-| **離線 FoD**(零連網,推薦) | `EMS_SAC_SOURCE=E:\` → 離線 DISM 烙入 | 無(建置主機非 Windows,無法離線 DISM;給路徑會直接報錯) |
-| **線上 FoD** | `EMS_SAC_SOURCE=online` → **目標端首次開機**連網裝 + 自動重開一次 | `EMS_SAC_SOURCE=online` → **構建期** qemu VM 連網下載並烙入 → 目標端**免連網**、首開機從本機套用 |
-| `EMS_SAC_SOURCE=skip`(預設) | 只出 boot-EMS,無互動 `SAC>` | 同左 |
+构建输出包括 `.qcow2` 和 `.vmpkg`。发布时按 **1900 MiB** 分片，并提供各原始文件的 SHA256 清单；总大小取决于实际镜像和压缩设置，不提供固定体积承诺。
 
-沒連網**不會卡死**:安裝腳本 try/catch 略過,boot-EMS 照常,只是少了互動 `SAC>`。
+下载一种产物的全部 `.partNN` 和对应 `.sha256` 到独立目录。**不能把 qcow2 与 vmpkg 分片混放**：`join-files.ps1` 会拼接目录中所有匹配的分片，并读取其中的 SHA256 文件。合并目标文件会被覆盖。
 
-### VM 要有一個 SBSA 埠設為 guest 主控台(SAC 才會綁上)
+```powershell
+# 在仓库目录执行；每个目录只放一种产物及其 SHA256 清单
+powershell -ExecutionPolicy Bypass -File .\scripts\join-files.ps1 `
+  -PartsDir .\parts-vmpkg -OutFile .\win11-arm64-droidvm.vmpkg
 
-SAC 走 ACPI SPCR,SPCR 由 edk2 依 crosvm 傳入的 SBSA UART FDT 節點生成,而該節點要被指定為 guest console 才會被 SPCR 指到。兩種取得方式:
-
-- **開箱即用 → 用 vmpkg**:builder 直接輸出**帶 config 的 `.vmpkg`**(本地 `vms.json` 維護,預設 **4 GB RAM + 256 MB swiotlb**,simplefb 60 Hz),其 `serial_ports` 已含 `{"hardware":"sbsa","num":1,"backend":"app_console","console":true}`(COM2-4 為 sink)。app 匯入整包即帶好設定,免手動、免 import→export 往返。
-- **裸 qcow2 → 使用者兩步**:app 裡 **外設 → 序列埠 → 新增 SBSA**,再點該埠的 **「作為 Guest 控制台(SPCR)」** radio。
-
-> **daemon 實際發出的 crosvm 旗標**(SBSA 埠設 app-console + console 時,供對照):
-> ```
-> --serial type=file,hardware=sbsa,num=1,earlycon,console,path=/proc/self/fd/N,input=/proc/self/fd/M
-> ```
-> 後端選 pty 則為 `type=pty,hardware=sbsa,num=1,console,earlycon[,path=symlink]`;sink 埠照發 `type=sink,hardware=serial,num=2..4`。`console`/`earlycon` 只掛在被選為 console 的那一個埠上。
-
-並需**新版 crosvm**:含 SBSA UART `@0x6000` + PmReset `@0x5000`(後者補上 Windows-on-ARM 無 PSCI 的關機/重啟,對齊 edk2 FADT)。
-
-## vmpkg 直接輸出(免 app import→export 往返)
-
-設 `OUT_VMPKG` 就會在 qcow2 之外**再吐一顆可直接匯入的 `.vmpkg`**,把 VM 設定(RAM / swiotlb / SBSA 主控台 / boot)一起烙進封裝 —— app 匯入即帶好設定,開箱即用、免手動、免每次跑 app 的 import→export。
-
-- **設定來源 = 本地 `vms.json`**(repo 根目錄,本地維護一份)。改它即可調 RAM / CPU / swiotlb / 序列埠等;packager 會自動把 qcow2 補成頂層 disk 條目。預設已放 `memory_mb=4096`、`swiotlb_mb=256`、`screens`(simplefb 1280×720 `poll_hz=60`;gpu-0 關、`refresh_rate=60`)、`serial_ports` 含 SBSA 主控台(SAC)+ COM sink、UEFI boot。顯示用的是 app 新版的 `screens` 排版;舊版 `display_*` 開關仍留著給沒有 `screens` 的舊 app 讀,但**不放** `display_width/height`(新 app 看到會把 simplefb 的 `poll_hz` 折回 30)。
-- **打包器**:兩份等價實作,容器 byte-exact 對齊 app 的 `PackageHeader`/`VMExportTask`(壓縮(GNU-tar)),壓縮都吃滿全部核心:
-  - Windows 路線用 **`pack-vmpkg.ps1`**——純 PowerShell + 內建 `tar.exe`(Win10 1803+),**零額外相依,不需要 Python**。預設 `-Compression auto`:`tar.exe` 帶 libzstd(Win11)就用 **zstd 多執行緒**(`-Threads`,預設全核;app 自家匯出也是 zstd),否則退回 gzip(bsdtar 的 gzip 只有單執行緒):
-    ```powershell
-    .\pack-vmpkg.ps1 -Qcow2 out.qcow2 -Config vms.json -Out win11.vmpkg   # [-Compression auto|zstd|gzip|none] [-Threads N]
-    ```
-  - macOS 路線用 **`pack-vmpkg.py`**(純 Python 3 stdlib,macOS 內建 python3)。gzip 是 pigz 式多執行緒(`--threads`,預設全核),輸出仍是單一標準 gzip member,app 端照常讀:
-    ```bash
-    python3 pack-vmpkg.py --qcow2 out.qcow2 --config vms.json --out win11.vmpkg   # [--threads N]
-    ```
-  - 入口變數:`VMPKG_COMPRESSION`(Windows 預設 `auto`、macOS 預設 `gzip`;`COMPRESS=1` 時兩者預設改為 `none`,見下)、`VMPKG_THREADS`(0 = 全核)。
-- **網路**:`vms.json` 的 `networks[]` 每個 NIC 帶 `pkg_network_ref`,並可內嵌 `pkg_network`(app 的 NetworkConfig,schema 2)。打包器把定義搬到 manifest 頂層 `networks[]` 並標上同一個 ref,即 app 匯出的形狀。匯入時「existing」模式依 **name** 對應到裝置上既有的網路(預設模板指向 `br-wifi`),「auto」模式會照定義**新建**一個(name / bridge 撞名會加尾碼)。
-- **單一檔 ≥ 8 GiB**(未壓縮的 qcow2 就會):GNU tar 用 base-256 記大小,app 的 `TarReader` 讀成 0 → 匯入得到 **0 B 磁碟**。打包器改寫成 12 位八進位(app 自己的 `TarWriter` 就是這樣寫,GNU tar / bsdtar / Python 也讀得懂):Python 版任何壓縮都適用;PowerShell 版只有 `-Compression none` 能改(壓縮串流裡改不到),其他情況印警告。根本解法是 app 端 `TarReader.parseOctal` 補 base-256。
-- **qcow2 壓縮 × vmpkg 壓縮怎麼搭**(路線 A 同一顆映像實測;qcow2 zstd 需新版 crosvm 直讀):
-
-  | | qcow2 | vmpkg | 匯入後裝置上的 qcow2 |
-  |---|---|---|---|
-  | `COMPRESS` 關 + vmpkg zstd(預設) | 9.78 GiB | **4.18 GiB** | 9.78 GiB;叢集未壓縮,讀寫無額外成本 |
-  | `COMPRESS=1` + vmpkg none | 4.70 GiB | 4.70 GiB | 4.70 GiB;每次讀要解壓叢集,寫入會 COW 成未壓縮叢集、檔案隨使用變大 |
-  | `COMPRESS=1` + vmpkg zstd | 4.70 GiB | 4.62 GiB | 同上 |
-
-  要**下載最小**就維持預設(不壓 qcow2、vmpkg zstd);要的是**裝置上省空間**才開 `COMPRESS=1`,此時 vmpkg 再壓只省 1.7%,所以 `VMPKG_COMPRESSION` 未指定(Windows `auto`)時自動改用 `none`,匯入即單純複製。
-
-> 相容性:`serial_ports` 是 app 新欄位。新版 app 讀它(自動帶上 SBSA 主控台);舊版 app 匯入會忽略它、靠 ensureDefaults 補 COM 四顆(只是少了 SBSA,不會壞)。
-
-## 需求
-
-- **macOS:** `brew install qemu wimlib xorriso colima docker`;另需約 **50 GB** 可用空間放中間產物(工作 qcow2 / 安裝 ISO / 驅動,位於 `macos/files`)。testsigning 的 BCD patch 用 Colima 容器內的 hivex 代跑,故無需另一台 Linux
-- **Windows:** x64 Windows(系統管理員)、內建 `dism` / `bcdboot` / `diskpart`、`qemu-img`(QEMU for Windows;沒裝的話 build 會問要不要 `winget install SoftwareFreedomConservancy.QEMU`,設 `QEMU_IMG_INSTALL=1` 免問直接裝。winget 上另一個 `cloudbase.qemu-img` 是 2.3.0,寫不了 zstd,別用)
-
-## 結構
-
+# 仅在需要裸磁盘时合并 qcow2
+powershell -ExecutionPolicy Bypass -File .\scripts\join-files.ps1 `
+  -PartsDir .\parts-qcow2 -OutFile .\win11-arm64-droidvm.qcow2
 ```
-macos_build.sh      路線 B 入口(改變數後 bash 執行)
-windows_build.ps1   路線 A 入口(改變數後以系統管理員執行)
-macos/              路線 B 實作:build.sh + 00/02/03 階段 + autounattend / gunyah-oobe + Colima BCD patch
-windows/            路線 A 實作:build.ps1 + unattend(詳見 windows/README.md)
-pack-vmpkg.py       qcow2 + vms.json → .vmpkg 打包器(純 stdlib,多執行緒 gzip;macOS 路線 OUT_VMPKG 用,也可獨立執行)
-pack-vmpkg.ps1      同上的 Windows 版(純 PowerShell + 內建 tar.exe,zstd 多執行緒;Windows 路線 OUT_VMPKG 用)
-vms.json            出廠 VM 設定模板(RAM/swiotlb/序列埠/boot);本地維護,打包時烙入 vmpkg
-files/              各路線的中間產物快取(URL 下載 / zip 解壓,已 gitignore)
-```
+
+必须看到 `sha256 OK` 才视为通过完整文件校验；缺少 `.sha256` 时脚本仍可合并，但不能据此声称已校验。校验通过后，在 DroidVM 中导入 `.vmpkg`；裸 `.qcow2` 需要另外配置虚拟机。首次硬件识别和系统配置发生在目标手机上，离线构建不会替代启动测试。
+
+## 手机配置与安全
+
+- [K70 Pro 验证记录](docs/k70pro.md)给出已启动的 Home 镜像环境。模板与实测配置必须分开看，不能把所有 Snapdragon 8 Gen 3 设备判为不可用，也不能把成功归因于未经独立对照的某个参数。
+- 网络是可选功能，未在该手机验证中测试；当前目标模板不配置网络。RDP 服务端需要 Pro，Home 启动成功不代表 RDP 可用；SSH、网桥和联网 SAC 也不能视为已验证。
+- 默认管理员账户为 `USER`，默认密码为 `DroidVM`。**必须在接入任何网络之前更换密码**，并检查自动登录、远程服务和防火墙设置。
+- 驱动证书、`testsigning` 和 `nointegritychecks` 用于测试签名驱动的信任与加载，会影响安全边界；它们不是 Windows 激活机制。Windows 授权与激活必须通过合法方式处理，本项目不提供盗版激活工具。
+- 本构建器只处理来宾镜像，**不包含手机 CPU / 固件刷写或宿主内核部署**。宿主修复与 DroidVM 版本是外部前提，必须另行评估。

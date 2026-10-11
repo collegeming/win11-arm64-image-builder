@@ -48,6 +48,11 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit
 }
 
+if ($env:DVM_DISM_DIR) {
+    $env:PATH = "$env:DVM_DISM_DIR;$env:PATH"
+    Import-Module "$env:DVM_DISM_DIR\Dism.psd1" -Force
+}
+
 $HERE = $PSScriptRoot
 $ROOT = Split-Path $HERE -Parent
 
@@ -194,43 +199,12 @@ function Get-FreeDriveLetter([string[]]$Exclude = @()) {
     throw "no free drive letter available"
 }
 
-# Resolve the install.wim image index. IMAGE_INDEX <= 0 -> list editions and let the user pick.
-# Uses Get-WindowsImage (native objects: ImageIndex/ImageName/ImageSize) - no text parsing.
-function Resolve-ImageIndex([string]$wim, [int]$wanted) {
-    Show-CommandLine "Get-WindowsImage" @("-ImagePath", $wim)
-    $images = @(Get-WindowsImage -ImagePath $wim)
-    $valid = @($images | ForEach-Object { [int]$_.ImageIndex })
-    if ($wanted -gt 0) {
-        if ($valid -notcontains $wanted) {
-            throw ("IMAGE_INDEX=$wanted not in this ISO. Available: " +
-                (($images | ForEach-Object { "$($_.ImageIndex)=$($_.ImageName)" }) -join ', '))
-        }
-        return $wanted
-    }
-    if ($images.Count -eq 1) {
-        Write-Host "[image] one edition only -> index $($valid[0]) ($($images[0].ImageName))"
-        return $valid[0]
-    }
-    Write-Host "`nEditions in install.wim:" -ForegroundColor Cyan
-    foreach ($im in $images) {
-        Write-Host ("  [{0}] {1}  ({2:N1} GB)" -f $im.ImageIndex, $im.ImageName, ($im.ImageSize / 1GB))
-    }
-    if ([Console]::IsInputRedirected) {
-        throw ("IMAGE_INDEX not set and no interactive console. Set IMAGE_INDEX to one of: " + ($valid -join ', '))
-    }
-    do {
-        $sel = (Read-Host "`nSelect image index").Trim()
-        $n = 0
-        $ok = [int]::TryParse($sel, [ref]$n) -and ($valid -contains $n)
-        if (-not $ok) { Write-Host ("  invalid, choose from: " + ($valid -join ', ')) -ForegroundColor DarkYellow }
-    } while (-not $ok)
-    return $n
-}
+. "$ROOT\scripts\select-pro-image.ps1"
 
 # --- Resolve config: environment variable (set by windows_build.ps1) > built-in default ---
 $SRC_ISO     = if ($env:SRC_ISO)     { $env:SRC_ISO }          else { $null }
 $DRIVERS_DIR = if ($env:DRIVERS_DIR) { $env:DRIVERS_DIR }      else { "https://github.com/Droid-VM/gunyah-guest-drivers-windows/releases/download/dev/gunyah-arm64-drivers.zip" }
-$IMAGE_INDEX = if ($env:IMAGE_INDEX) { [int]$env:IMAGE_INDEX } else { 0 }       # 0 = list editions and prompt
+$IMAGE_INDEX = if ($env:IMAGE_INDEX) { [int]$env:IMAGE_INDEX } else { 0 }       # 0 = select Professional ARM64
 $DISK_MB     = if ($env:DISK_SIZE_MB){ [int]$env:DISK_SIZE_MB }else { 40960 }
 $OUT_QCOW    = if ($env:OUT_QCOW)    { $env:OUT_QCOW }         else { Join-Path $ROOT "win11-droidvm-final.qcow2" }
 # Optional: also pack a ready-to-import .vmpkg (qcow2 + local VM config baked in) with pack-vmpkg.ps1
@@ -339,18 +313,15 @@ try {
     if (-not (Test-Path $wim)) {
         $esd = "${isoLetter}:\sources\install.esd"
         if (-not (Test-Path $esd)) { throw "neither install.wim nor install.esd found in ISO ($isoLetter`:\sources\)" }
-        $esdIdx = 0
-        if ($env:ESD_IMAGE_INDEX) { [void][int]::TryParse($env:ESD_IMAGE_INDEX, [ref]$esdIdx) }
-        if ($esdIdx -le 0) {
-            throw "ISO ships install.esd and ESD_IMAGE_INDEX is not set. Set it to the edition index to export (0 = auto-pick 'Windows 11 Pro')."
-        }
-        Write-Host "[iso] install.esd -> exporting index $esdIdx to install.wim ..."
+        $esdIdx = Get-ProImageIndex -ImagePath $esd -RequestedIndex $IMAGE_INDEX
+        Write-Host "[iso] install.esd -> exporting Pro index $esdIdx to install.wim ..."
         $wim = Join-Path $WORK "install.wim"
-        Export-WindowsImage -SourceImagePath $esd -SourceIndex $esdIdx -DestinationImagePath $wim -CompressionType Max -CheckIntegrity
+        Export-WindowsImage -SourceImagePath $esd -SourceIndex $esdIdx -DestinationImagePath $wim -CompressionType Max -CheckIntegrity | Out-Null
+        $IMAGE_INDEX = 1
         Write-Host "[iso] exported $wim ($('{0:N1} GB' -f ((Get-Item $wim).Length / 1GB)))"
     }
     Write-Host "[iso] $SRC_ISO"
-    $IMAGE_INDEX = Resolve-ImageIndex $wim $IMAGE_INDEX
+    $IMAGE_INDEX = Get-ProImageIndex -ImagePath $wim -RequestedIndex $IMAGE_INDEX
     Write-Host "[image] using index $IMAGE_INDEX"
 
     # === 3) Create + attach VHDX, GPT partition: ESP(FAT32) + MSR + Windows(NTFS) ===
@@ -381,6 +352,10 @@ exit
     # === 4) Apply image ===
     Write-Host "[dism] applying install.wim -> $W\ ..."
     Invoke-ExternalCommand -FilePath "dism" -ArgumentList @("/Apply-Image", "/ImageFile:$wim", "/Index:$IMAGE_INDEX", "/ApplyDir:$W\") -OutNull -What "dism /Apply-Image"
+
+    $metadataPath = if ($env:IMAGE_METADATA_PATH) { $env:IMAGE_METADATA_PATH } else { "$OUT_QCOW.metadata.json" }
+    & "$ROOT\scripts\service-image.ps1" -MountDir "$W\" -CacheDir (Join-Path $ROOT 'windows\files\updates') -MetadataPath $metadataPath
+    if (-not (Test-Path -LiteralPath $metadataPath)) { throw 'Image servicing produced no metadata' }
 
     # === 5) Offline driver injection (no signature prompt) ===
     # Offline-inject only the driver subfolders listed in DRIVER_INSTALL (empty=the whole $drvDir /Recurse). /ForceUnsigned skips the signature prompt.
@@ -593,6 +568,8 @@ exit
     # setup-ssh.ps1 is run by unattend FirstLogonCommands at first boot (installing the sshd service requires online registration).
     $stage = "$W\DroidVM"
     New-Item -ItemType Directory -Force $stage | Out-Null
+    Copy-Item (Join-Path $HERE "verify-image.ps1") "$stage\verify-image.ps1" -Force
+    Copy-Item -LiteralPath $metadataPath -Destination "$stage\image-metadata.json"
     Copy-Item (Join-Path $HERE "setup-ssh.ps1") "$stage\setup-ssh.ps1" -Force
     # First-logon half of the debloat (telemetry / services / tasks / Windows Update off + desktop
     # enable_windows_update.bat); the offline half ran in step 6. Mirrors macos/debloat.ps1.
@@ -659,6 +636,7 @@ exit
     if ($COMPRESS) { $convArgs += @("-c", "-o", "compression_type=zstd") }
     $convArgs += @("-O", "qcow2", $VHDX, $OUT_QCOW)
     Invoke-ExternalCommand -FilePath "qemu-img" -ArgumentList $convArgs -What "qemu-img convert"
+    Invoke-ExternalCommand -FilePath "qemu-img" -ArgumentList @("check", $OUT_QCOW) -What "qemu-img check"
     $sz = "{0:N1} GB" -f ((Get-Item $OUT_QCOW).Length / 1GB)
     Write-Host "Done  -> $OUT_QCOW ($sz)" -ForegroundColor Green
 

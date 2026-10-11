@@ -140,6 +140,10 @@
           <Order>11</Order><Description>ensure EMS-SAC toolset (FoD)</Description>
           <CommandLine>cmd /c if exist C:\DroidVM\setup-ems-sac.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\setup-ems-sac.ps1</CommandLine>
         </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>12</Order><Description>verify installed edition and update build</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\verify-image.ps1</CommandLine>
+        </SynchronousCommand>
       </FirstLogonCommands>
     </component>
 

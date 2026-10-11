@@ -18,8 +18,8 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 
 
-$env:SRC_ISO       = "%USERPROFILE%\Downloads\SW_DVD9_Win_Pro_11_25H2_Arm64_English_Pro_Ent_EDU_N_MLF_X24-13111.ISO"
-# $env:IMAGE_INDEX = "1"
+if (-not $env:SRC_ISO) { throw 'Set SRC_ISO to a genuine Windows 11 26H2 ARM64 ISO before running this entry point.' }
+if (-not $env:IMAGE_INDEX) { $env:IMAGE_INDEX = '0' }
 $env:OUT_QCOW      = "win11-droidvm-final.qcow2"
 $env:OUT_VMPKG     = "win11-droidvm-final.vmpkg"
 $env:DRIVERS_DIR   = "https://github.com/HuJK/gunyah-guest-drivers-windows/releases/download/dev/gunyah-arm64-drivers.zip"
@@ -27,7 +27,8 @@ $env:OPENSSH_SRC   = "https://github.com/PowerShell/Win32-OpenSSH/releases/downl
 
 $env:DVM_USERNAME      = "USER"
 $env:DVM_PASSWORD      = "DroidVM"
-$env:SSH_PUBKEY        = "ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@ReplaceMe"
+if (-not $env:SSH_PUBKEY) { $env:SSH_PUBKEY = '' }
+if (-not $env:DROIDVM_LOCALE) { $env:DROIDVM_LOCALE = 'zh-CN' }
 
 $env:DISK_SIZE_MB      = "40960" # 40GB
 $env:VMPKG_COMPRESSION = "auto"

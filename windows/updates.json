@@ -1,0 +1,16 @@
+{
+  "display_version": "26H2",
+  "build": "26300.9550",
+  "kb": "KB5124010",
+  "support_url": "https://support.microsoft.com/en-us/servicing/os/windows-11/2026/09/kb5124010-windows-11-24h2-25h2-update",
+  "catalog_url": "https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=75624874-61ea-4cc1-ada2-109fa4e4c3b2",
+  "package": {
+    "url": "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/5449be9c-dd18-4af4-81ae-0ddc1bb6b530/public/windows11.0-kb5124010-arm64_4ecd910ae0627561f49824e032723628302cdd21.msu",
+    "sha256": "f605963512796d53e7151cb2acc8b0c625b7e976ec98cfd4c9faad7bb9fbd593"
+  },
+  "checkpoint": {
+    "kb": "KB5043080",
+    "url": "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/f263aa64-f367-42f0-9cad-328f342b93f7/public/windows11.0-kb5043080-arm64_df540a05f9b118e339c5520f4090bb5d450f090b.msu",
+    "sha256": "63459e3a22f85dc6748c3bdfa906ff0e7c3ea93c8fe7ae3b89d3f3a7c05542d0"
+  }
+}

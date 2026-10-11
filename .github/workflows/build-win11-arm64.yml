@@ -1,4 +1,4 @@
-name: Build Windows 11 ARM64 image for DroidVM
+name: Build Windows 11 Pro 26H2 ARM64 for DroidVM
 
 # Builds a bootable, driver-injected Windows 11 ARM64 qcow2/.vmpkg for DroidVM from the
 # official Microsoft ISO, with optional Chinese (zh-CN) support and tiny11-style debloat.
@@ -29,7 +29,7 @@ on:
         required: true
         default: 'windows-2022'
       image_index:
-        description: 'install.wim edition index; 0 = auto-pick "Windows 11 Pro"'
+        description: 'Pro ARM64 index; 0 = select EditionID Professional (no fallback)'
         required: true
         default: '0'
       disk_size_mb:
@@ -128,6 +128,23 @@ jobs:
       - name: Checkout builder
         uses: actions/checkout@v4
 
+      - name: Install supported Windows ADK deployment tools
+        shell: pwsh
+        run: |
+          $setup = Join-Path $env:WORK_ROOT 'adksetup.exe'
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2289980' -OutFile $setup
+          if ((Get-AuthenticodeSignature $setup).Status -ne 'Valid') { throw 'Invalid ADK installer signature' }
+          $install = Start-Process $setup -ArgumentList '/quiet /norestart /ceip off /features OptionId.DeploymentTools' -Wait -PassThru
+          if ($install.ExitCode -notin 0,3010) { throw "ADK install failed ($($install.ExitCode))" }
+          $dismDir = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\DISM"
+          if (-not (Test-Path "$dismDir\dism.exe")) { throw 'ADK DISM not found' }
+          "DVM_DISM_DIR=$dismDir" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $dismDir | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Validate builder scripts
+        shell: powershell
+        run: .\tests\test-build.ps1
+
       - name: Ensure qemu-img
         shell: pwsh
         run: |
@@ -183,14 +200,11 @@ jobs:
       - name: Resolve image index
         shell: pwsh
         run: |
-          # CI cannot answer build.ps1's interactive edition prompt.
-          $idx = $env:IMAGE_INDEX
-          if (-not $idx -or [int]$idx -le 0) {
-            $idx = & "$env:GITHUB_WORKSPACE\scripts\resolve-image-index.ps1" `
-                     -IsoPath $env:SRC_ISO -Match '^Windows 11 Pro$' |
-                   Where-Object { $_ -match '^\d+$' } | Select-Object -Last 1
-            if (-not $idx) { throw "could not resolve an image index" }
-          }
+          Import-Module "$env:DVM_DISM_DIR\Dism.psd1" -Force
+          $idx = & "$env:GITHUB_WORKSPACE\scripts\resolve-image-index.ps1" `
+                   -IsoPath $env:SRC_ISO -RequestedIndex ([int]$env:IMAGE_INDEX) |
+                 Where-Object { $_ -match '^\d+$' } | Select-Object -Last 1
+          if (-not $idx) { throw 'Could not resolve the Pro ARM64 image index' }
           Write-Host "IMAGE_INDEX=$idx"
           "IMAGE_INDEX=$idx"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "ESD_IMAGE_INDEX=$idx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -205,8 +219,9 @@ jobs:
         run: |
           $out = Join-Path $env:WORK_ROOT 'out'
           New-Item -ItemType Directory -Force $out | Out-Null
-          $env:OUT_QCOW  = Join-Path $out 'win11-arm64-droidvm.qcow2'
-          $env:OUT_VMPKG = Join-Path $out 'win11-arm64-droidvm.vmpkg'
+          $env:OUT_QCOW  = Join-Path $out 'win11-pro-26h2-26300.9550-arm64-droidvm.qcow2'
+          $env:IMAGE_METADATA_PATH = Join-Path $out 'image-metadata.json'
+          $env:OUT_VMPKG = Join-Path $out 'win11-pro-26h2-26300.9550-arm64-droidvm.vmpkg'
           $env:VMS_JSON  = "$env:GITHUB_WORKSPACE\vms.json"
           # DROIDVM_DEBLOAT=off skips the tiny11 pass entirely.
           if ($env:DROIDVM_DEBLOAT_LEVEL -eq 'off') { $env:DROIDVM_DEBLOAT = '0' }
@@ -230,6 +245,7 @@ jobs:
           foreach ($f in $files) {
             & "$env:GITHUB_WORKSPACE\scripts\split-file.ps1" -Path $f.FullName -OutDir $parts -PartSizeMB 1900
           }
+          Copy-Item (Join-Path $out 'image-metadata.json') $parts
           Get-ChildItem $parts | Select-Object Name,@{n='GB';e={[math]::Round($_.Length/1GB,2)}} | Format-Table -AutoSize
 
       - name: Upload artifact
@@ -247,11 +263,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $parts = Join-Path $env:WORK_ROOT 'parts'
-          $tag = "win11-$env:WIN_RELEASE-arm64-$(Get-Date -Format yyyyMMdd-HHmmss)"
+          $meta = Get-Content (Join-Path $parts 'image-metadata.json') -Raw | ConvertFrom-Json
+          if ($meta.edition_id -ne 'Professional' -or $meta.display_version -ne '26H2' -or $meta.target_build -ne '26300.9550') { throw 'Unexpected release metadata' }
+          $tag = "win11-pro-$($meta.display_version)-$($meta.target_build)-arm64-$env:GITHUB_RUN_ID"
           $files = @(Get-ChildItem -LiteralPath $parts | ForEach-Object { $_.FullName })
-          # Release assets cap at 2 GB, hence the ~1.9 GB parts.
-          & gh release create $tag @files `
-              --repo "$env:GITHUB_REPOSITORY" `
-              --title "Windows 11 $env:WIN_RELEASE ARM64 for DroidVM ($env:ISO_LANG)" `
-              --notes "Built from the official Microsoft Windows 11 ARM64 ISO ($env:WIN_RELEASE, $env:ISO_LANG) with DroidVM's modified VirtIO drivers injected. Debloat=$env:DROIDVM_DEBLOAT_LEVEL, keepCjk=$env:DROIDVM_KEEP_CJK, locale=$env:DROIDVM_LOCALE. Reassemble with scripts/join-files.ps1 then import the .vmpkg in DroidVM."
+          $notes = @"
+          Windows 11 Pro $($meta.display_version) ARM64, target Build $($meta.target_build), $($meta.kb).
+
+          - Source: official Microsoft ARM64 ISO ($env:ISO_LANG); selected by EditionID Professional, not localized edition names.
+          - $($meta.kb) ARM64 is integrated offline and its SHA256 is checked against Microsoft Update Catalog.
+          - Offline registry build: $($meta.build); update pending first boot: $($meta.update_pending_first_boot). See image-metadata.json for package state. This is not yet a device-tested Pro release.
+          - Chinese locale: $env:DROIDVM_LOCALE; tiny11-style debloat: $env:DROIDVM_DEBLOAT_LEVEL; preserve CJK fonts/IME: $env:DROIDVM_KEEP_CJK.
+          - Modified DroidVM drivers, test signing, unattended local account and staged SSH/RDP setup; no Windows license or activation is included.
+          - K70 Pro template: 2 CPUs, 1792 MiB RAM, 256 MiB DMA pool, hugepages on, prepare_lend_mthp disabled, SimpleFB native 1280x720/30Hz, VirtIO GPU and USB off, no NIC. The previous Home 26300.9457 image booted with this configuration; this Pro image still needs first-boot validation.
+          - Reassemble each format in its own directory with scripts/join-files.ps1, verify SHA256, then import the .vmpkg in DroidVM. Use C:\DroidVM\verify-image.ps1 after boot to check Professional / 26H2 / 26300.9550.
+          - Default account USER / DroidVM: change the password before enabling a network. Networking, USB, audio and long-term stability are not verified.
+          "@
+          $notesFile = Join-Path $env:WORK_ROOT 'release-notes.md'
+          $notes | Set-Content $notesFile -Encoding UTF8
+          & gh release create $tag @files --repo "$env:GITHUB_REPOSITORY" `
+              --title "Windows 11 Pro $($meta.display_version) ARM64 - Build $($meta.target_build) ($($meta.kb))" `
+              --notes-file $notesFile --prerelease
           if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
