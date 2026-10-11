@@ -4,11 +4,11 @@ Despite this file's historical name, it is an English compatibility entry point.
 
 This fork builds Windows 11 ARM64 `.qcow2` disks and DroidVM `.vmpkg` packages from an official Microsoft ISO with modified Gunyah/VirtIO drivers. The Windows/DISM route is the primary path. The retained macOS route is experimental and unvalidated in this fork; equivalent outputs are not claimed.
 
-## Targets are not test results
+## Verified Pro release
 
-The new build targets **Windows 11 Pro 26H2, 26300.9550, with KB5124010**. This target has not yet been validated on the phone. Image selection must use `EditionID=Professional` and `Architecture=12`, fail unless the match is unique, and never silently fall back to index 1. Official update packages must be applied after the OS image and before `ResetBase`; `image-metadata.json` must report actual values and any pending servicing state rather than repeat the requested target.
+**Windows 11 Pro 26H2, Build 26300.9550, with KB5124010**, has been built and booted to the Chinese desktop on Redmi K70 Pro. Both the actual offline registry/package state and the phone's online `winver` dialog confirm the edition and build. [Download the Pro release](https://github.com/collegeming/win11-arm64-image-builder/releases/tag/win11-pro-26H2-26300.9550-arm64-38108924414).
 
-The prior K70 Pro boot result was **Home 26H2, 26300.9457**, not Pro. See the [K70 Pro validation record](docs/k70pro.md) for the tested host, app and VM configuration, the old release's edition-selection issue, and the limits of that evidence.
+Image selection uses `EditionID=Professional` and `Architecture=12`, fails unless the match is unique, and never falls back to Home. The official ARM64 update is SHA256-checked and installed before component cleanup. See [K70 Pro evidence and limits](docs/k70pro.md): first initialization required stopping and starting the VM after a black screen; networking, USB, audio and long-term stability remain untested. The historical Home 26300.9457 assets remain separately labelled Home.
 
 ## Navigation
 
