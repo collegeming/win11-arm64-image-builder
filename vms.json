@@ -27,5 +27,41 @@
     { "hardware": "serial", "num": 3, "backend": "sink", "fixed": true },
     { "hardware": "serial", "num": 4, "backend": "sink", "fixed": true }
   ],
-  "boot": { "protocol": "uefi", "uefi": { "vars_enabled": true, "vars": "", "firmware": "" } }
+  "boot": { "protocol": "uefi", "uefi": { "vars_enabled": true, "vars": "", "firmware": "" } },
+  "networks": [
+    {
+      "pkg_network_ref": "net0",
+      "pkg_network": {
+        "schema": 2,
+        "name": "wifi-nat",
+        "bridge_name": "br-wifi-nat",
+        "bridge_type": "linux",
+        "uplink_mode": "l3",
+        "stp": false,
+        "auto_up": true,
+        "l3": {
+          "vlans": [
+            {
+              "vlan_id": 0,
+              "ipv4": {
+                "cidr": "192.168.58.1/24",
+                "dhcp": { "offset_start": 128, "offset_end": 192, "enabled": true },
+                "snat": true
+              },
+              "ipv6": {
+                "cidr": "fd00:58::1/64",
+                "source": "static",
+                "snat": false,
+                "slaac": { "enabled": false },
+                "dhcp": { "offset_start": 128, "offset_end": 192, "enabled": false }
+              },
+              "ipv4_secondary": [],
+              "ipv6_secondary": [],
+              "dns_servers": []
+            }
+          ]
+        }
+      }
+    }
+  ]
 }

@@ -108,7 +108,8 @@ foreach ($p in @($Qcow2, $Config)) {
 $Qcow2 = (Resolve-Path -LiteralPath $Qcow2).ProviderPath
 $Config = (Resolve-Path -LiteralPath $Config).ProviderPath
 if (-not [IO.Path]::IsPathRooted($Out)) { $Out = Join-Path (Get-Location).ProviderPath $Out }
-$tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+$nativeTar = Join-Path $env:SystemRoot 'System32\tar.exe'
+$tar = if (Test-Path -LiteralPath $nativeTar) { Get-Command $nativeTar } else { Get-Command tar.exe -ErrorAction SilentlyContinue }
 if (-not $tar) { throw "tar.exe not found (ships with Windows 10 1803+)" }
 $tarVersion = (& $tar.Source --version 2>&1 | Out-String).Trim()
 $hasZstd = $tarVersion -match "libzstd"
