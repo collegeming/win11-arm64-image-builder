@@ -455,8 +455,13 @@ exit
     # Mirrors the macOS debloat's WinSxS compaction and hibernate disable, here using the offline version (no boot needed).
     # Purely to shrink the image; failure does not affect usability, so everything is set as non-fatal.
     Write-Host "[debloat] WinSxS component cleanup (ResetBase, offline) ..."
+    & dism "/Image:$W\" /Cleanup-Image /AnalyzeComponentStore
+    Write-Host "[size] Component analysis before cleanup exit code: $LASTEXITCODE"
     try {
-        Invoke-ExternalCommand -FilePath "dism" -ArgumentList @("/Image:$W\", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase") -OutNull -What "dism /Cleanup-Image /ResetBase"
+        Invoke-ExternalCommand -FilePath "dism" -ArgumentList @("/Image:$W\", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase") -What "dism /Cleanup-Image /ResetBase"
+        Write-Host "[debloat] ResetBase exit code: $LASTEXITCODE"
+        & dism "/Image:$W\" /Cleanup-Image /AnalyzeComponentStore
+        Write-Host "[size] Component analysis after cleanup exit code: $LASTEXITCODE"
     } catch {
         Write-Host "  (skipping ResetBase: $($_.Exception.Message))" -ForegroundColor DarkYellow
     }

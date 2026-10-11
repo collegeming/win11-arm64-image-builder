@@ -65,9 +65,9 @@ on:
         required: true
         default: 'online'
       compress_qcow2:
-        description: 'zstd-compress qcow2 clusters: 1 = smaller, 0 = plain'
+        description: 'Lossless zstd QCOW2: 1 = compact (needs recent crosvm), 0 = plain'
         required: true
-        default: '0'
+        default: '1'
       publish_release:
         description: 'Publish the split parts as a GitHub Release (true/false)'
         required: true
