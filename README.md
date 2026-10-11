@@ -2,7 +2,7 @@
 
 本分支基于 [Droid-VM/win11-arm64-image-builder](https://github.com/Droid-VM/win11-arm64-image-builder)，使用微软官方 ARM64 ISO 和 DroidVM 修改版 Gunyah/VirtIO 驱动，生成 `.qcow2` 磁盘和可导入的 `.vmpkg`。主要路径是在 x64 Windows 上用 DISM 离线构建，支持简体中文资源保留和可选精简。
 
-**构建目标为 Windows 11 Pro 26H2、26300.9550（KB5124010）；这不是已验证结果。** 已有手机启动证据来自 Home 26H2、26300.9457，不能据此宣称新 Pro 镜像或目标补丁已通过验证。本文件是本分支的权威概览；[K70 Pro 验证记录](docs/k70pro.md)列出证据与限制，[英文入口](README.zh-fork.md)仅提供导航。
+**Windows 11 专业版（Pro）26H2、Build 26300.9550，已集成 KB5124010，并在 Redmi K70 Pro 上进入中文桌面。** 构建时按真实版本信息选择和校验专业版；手机 `winver` 也确认了专业版、26H2 和 `26300.9550`。下载见[专业版 Release](https://github.com/collegeming/win11-arm64-image-builder/releases/tag/win11-pro-26H2-26300.9550-arm64-38108924414)，证据与未验证功能见 [K70 Pro 验证记录](docs/k70pro.md)。
 
 ## 目标与验收边界
 
@@ -14,7 +14,7 @@
 | 更新包 | 必须使用 KB5124010 的官方 ARM64 包及所需前置包；在应用系统映像之后、`ResetBase` 之前安装 |
 | 构建证据 | `image-metadata.json` 必须记录实际版本、EditionID、架构、构建号和更新包状态；实际值不能用目标值代填 |
 | 待重启状态 | 如离线更新仍 pending，必须明确记录；首次启动并完成更新后，再核对实际构建号和包状态 |
-| 手机验证 | Pro 与精确构建号 `26300.9550` 尚未验证；不能仅凭构建成功、文件名或 Release 标题判定通过 |
+| 手机验证 | K70 Pro 上的中文桌面与 `winver` 已确认 Pro / 26H2 / `26300.9550`；联网、USB、音频与长期稳定性未验证 |
 
 以上是新 Pro 构建的验收要求。下载时必须核对对应产物的元数据；未提供元数据或仍处于待验证状态的产物，不应视为已满足目标。
 
@@ -38,11 +38,14 @@
 
 ### 本地 x64 Windows
 
-需要管理员权限、内置 DISM / bcdboot / diskpart，以及 `qemu-img`。准备官方 ARM64 ISO、修改版驱动和更新包，并预留足够空间供 ISO、VHDX、转换输出及 ESD 导出使用。
+需要管理员权限、bcdboot / diskpart、支持 26H2 的 Windows ADK 部署工具或对应新版系统 DISM，以及 `qemu-img`。工作流会安装微软 ADK 部署工具。准备官方 ARM64 ISO，并预留足够空间供 ISO、更新包、VHDX、转换输出及 ESD 导出使用；KB5124010 包由脚本下载并校验。
 
-编辑 `windows_build.ps1` 顶部的配置后，在仓库目录运行：
+设置官方 ISO 路径，并按需编辑 `windows_build.ps1` 的账户和输出配置，在仓库目录运行：
 
 ```powershell
+$env:SRC_ISO = 'E:\ISO\Windows11_Client_arm64_zh-cn_26300_9457.iso'
+# 使用 ADK 时，设置其 amd64 DISM 目录；脚本会导入对应 Dism 模块
+$env:DVM_DISM_DIR = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\DISM'
 powershell -ExecutionPolicy Bypass -File .\windows_build.ps1
 ```
 
@@ -82,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\join-files.ps1 `
 
 ## 手机配置与安全
 
-- [K70 Pro 验证记录](docs/k70pro.md)给出已启动的 Home 镜像环境。模板与实测配置必须分开看，不能把所有 Snapdragon 8 Gen 3 设备判为不可用，也不能把成功归因于未经独立对照的某个参数。
+- [K70 Pro 验证记录](docs/k70pro.md)给出已启动的 Pro 26H2 / `26300.9550` 环境及历史家庭版选择问题。首次初始化经过“准备就绪”后曾黑屏，停止并重新启动虚拟机后进入桌面；手机没有重启。不能把成功归因于未经独立对照的某个参数。
 - 网络是可选功能，未在该手机验证中测试；当前目标模板不配置网络。RDP 服务端需要 Pro，Home 启动成功不代表 RDP 可用；SSH、网桥和联网 SAC 也不能视为已验证。
 - 默认管理员账户为 `USER`，默认密码为 `DroidVM`。**必须在接入任何网络之前更换密码**，并检查自动登录、远程服务和防火墙设置。
 - 驱动证书、`testsigning` 和 `nointegritychecks` 用于测试签名驱动的信任与加载，会影响安全边界；它们不是 Windows 激活机制。Windows 授权与激活必须通过合法方式处理，本项目不提供盗版激活工具。

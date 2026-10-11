@@ -1,43 +1,52 @@
-# K70 Pro：已验证环境与待验证目标
+# K70 Pro：Windows 11 Pro 26H2 验证记录
 
-本记录区分已观察到的 Home 启动结果与新 Pro 构建目标。构建、下载和安全要求见[主 README](../README.md)。以下结果只适用于列出的整套环境，不代表所有 Snapdragon 8 Gen 3 设备，也不能证明某个配置项单独导致启动成功。
+2026-10-11，构建产物 **Windows 11 专业版 26H2、Build 26300.9550（KB5124010）** 已在 Redmi K70 Pro 上进入中文桌面。原 Windows11 条目已切换到新专业版磁盘，手机原生显示中打开的 `winver` 确认了专业版、26H2 和 `26300.9550`。以下结论只覆盖本次列出的环境，不代表所有 Snapdragon 8 Gen 3 手机或长期稳定性。
 
-## 已观察到的启动结果
+![手机上运行的 Windows 11 专业版版本窗口](windows11-pro-winver.png)
 
-在 K70 Pro 上，来宾进入 Windows 桌面，`winver` 显示 **Windows 11 Home 26H2、26300.9457**；还通过原 DroidVM 应用重复启动。该结果不是 Pro 或 `26300.9550` 的验证。
+## 构建与文件校验
+
+- [成功构建 38108924414](https://github.com/collegeming/win11-arm64-image-builder/actions/runs/38108924414)，构建提交 `17d7108`。
+- [专业版 Release](https://github.com/collegeming/win11-arm64-image-builder/releases/tag/win11-pro-26H2-26300.9550-arm64-38108924414)。
+- 官方 zh-CN ARM64 ISO 的索引 3 为专业版。脚本按 `EditionID=Professional`、ARM64 架构选择，拒绝家庭版和错误架构。
+- KB5124010 ARM64 下载包 SHA256 与 Microsoft Update Catalog 记录一致。离线服务完成后，包 `Package_for_RollupFix~31bf3856ad364e35~arm64~~26100.9550.1.28` 为 `Installed`，`update_pending_first_boot=false`。
+- 实际离线注册表为 `EditionID=Professional`、`DisplayVersion=26H2`、`CurrentBuildNumber=26300`、`UBR=9550`；本地解出的磁盘也经只读挂载再次核对。
+- 安装包完整 SHA256：`96261a6dd0c75e9ede4a1bc2802726552c18a716910b473df2613dacdc349013`。
+- 未启动原始 QCOW2 SHA256：`a5a3770849dfe50960ae43864bdb1fe56cf7ca97fd9fd1a9fcb8073ca4584300`。本地文件和手机上传后文件均匹配。启动后的可写磁盘会变化，不能继续用原始散列判定启动后文件完整性。
+- `qemu-img check` 对本地原始磁盘和手机上传后的磁盘均未发现结构错误。
+
+`image-metadata.json` 中 `ProductName` 的旧兼容字符串不是版本选择依据；本次以 EditionID、DisplayVersion、CurrentBuildNumber/UBR 与在线 `winver` 一致性验收，没有改写注册表来伪造版本名称。
+
+## 实机配置
 
 | 项目 | 验证环境 |
 |---|---|
-| 手机 / SoC | K70 Pro / SM8650 |
+| 手机 / SoC | Redmi K70 Pro / SM8650 |
 | 宿主内核 | GKI 6.1.138，含 VMID 与 kvcalloc 修复 |
-| DroidVM | `0.0.6.r240.5c89691` |
+| DroidVM | `0.0.6.r240.5c89691-dev` |
+| 模式 | `protected_without_firmware` |
 | CPU / 内存 | 2 CPU / 1792 MiB |
 | restricted-DMA 缓冲池 | `swiotlb` 256 MiB |
 | 大页 | `hugepages=true` |
-| 借出内存准备 | `prepare_lend_mthp` 禁用 |
-| 显示 | SimpleFB，native exporter，1280 × 720，30 Hz |
-| GPU / USB | 均关闭 |
+| LEND 预整理 | `prepare_lend_mthp=disabled` |
+| 显示 | SimpleFB，原生显示，1280×720，30 Hz |
+| GPU / USB | 禁用 |
 | 网络 | 无 NIC |
 
-模板是打包配置，不是测试证据。复现时必须检查导入后的配置是否与上述环境一致；本记录没有验证网络、RDP、SSH、交互式 SAC、GPU 加速或 USB。
+仓库 `vms.json` 使用上述保守配置。模板是可复现的设置，不等于每台手机都通过验证。宿主修复和多项配置共同使用，没有独立对照证明某项参数单独导致启动成功。
 
-## 待验证的 Pro 镜像
+## 首次启动与当前限制
 
-新构建目标是 **Pro 26H2、26300.9550（KB5124010）**，不能沿用 Home 镜像的成功结论。
+新磁盘首次启动经过“准备就绪”后黑屏，没有观察到新的保护内存队列错误；等待初始化写入停止后，停止并重新启动虚拟机，随后进入中文桌面。此流程没有重启或刷写手机。实际操作中应为首次初始化留出时间，不要将短暂黑屏立即判为内核不支持。
 
-发布前必须核对：
+- 专业版桌面、原生显示和键盘输入已验证；`winver` 可打开并显示正确版本。
+- 最终启动日志仍有 `GH_VM_SET_BOOT_CONTEXT failed`，该 UEFI 路径兼容回退后可以启动；不能只凭此日志判失败。
+- 联网、RDP、SSH、音频、USB、交互式 SAC、GPU 加速和长期稳定性未验证。
+- 虚拟电源按钮和自动关机生命周期仍有早期测试中发现的限制，不能因本次启动通过就宣称修复。
+- 发布附件是首次初始化前的镜像；手机正在使用的镜像已完成初始化并有后续写入。用户再次导入附件时仍需完成首次初始化。
 
-1. 系统映像唯一匹配 `EditionID=Professional`、`Architecture=12`；显式索引也必须满足这些条件。
-2. `TARGET_DISPLAY_VERSION=26H2`、`TARGET_BUILD=26300.9550`；官方 KB5124010 ARM64 更新包及所需前置包在映像应用后、`ResetBase` 前安装。
-3. `image-metadata.json` 保存实际版本、架构、构建号和包状态；离线更新 pending 时明确记录，不能把目标构建号填成实际结果。
-4. 手机首次启动完成更新后，核对桌面 `winver`、实际构建号及包状态，并通过原应用重复启动。
+## 历史家庭版与回退
 
-这些检查尚未形成新 Pro 镜像的通过结论。没有完成检查时，应当标为待验证，不宣称精确构建号或手机兼容性已确认。
+旧 `26300.9457` 产物为 Home。旧脚本只匹配英文 `Windows 11 Pro`，未匹配中文“Windows 11 专业版”后回退到索引 1。旧 Release 已按实际内容更正为 Home，不修改旧附件冒充 Pro。
 
-## 历史发布说明
-
-旧 `26300.9457` 发布产物实际为 **Home**。当时版本选择使用英文名称正则，未匹配中文映像名称后回退到索引 1，因而选择了 Home；不能把该发布当作 Pro。
-
-既有 Release 的标题和说明需要单独按实际产物更正。修正文案不会把 Home 文件变成 Pro，也不会证明 KB5124010 已安装；应当以对应产物的实际信息为准。
-
-宿主内核修复和上述配置是在同一次成功环境中使用的，没有独立对照证明某项参数的单独作用。本项目不提供宿主内核或手机固件刷写步骤。
+本次替换使用新的专业版磁盘文件，手机原来的 `win11-arm64-ready.qcow2` 家庭版磁盘和切换前配置备份仍保留。项目只构建来宾镜像，不包含宿主内核或手机固件刷写。
