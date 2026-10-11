@@ -218,7 +218,10 @@ jobs:
           VMPKG_COMPRESSION: 'auto'
         run: |
           $out = Join-Path $env:WORK_ROOT 'out'
-          New-Item -ItemType Directory -Force $out | Out-Null
+          $scratch = Join-Path $env:WORK_ROOT 'scratch'
+          New-Item -ItemType Directory -Force $out,$scratch | Out-Null
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
           $env:OUT_QCOW  = Join-Path $out 'win11-pro-26h2-26300.9550-arm64-droidvm.qcow2'
           $env:IMAGE_METADATA_PATH = Join-Path $out 'image-metadata.json'
           $env:OUT_VMPKG = Join-Path $out 'win11-pro-26h2-26300.9550-arm64-droidvm.vmpkg'
