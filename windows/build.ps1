@@ -298,6 +298,10 @@ try {
     if (-not (Test-Path $DRIVER_DIR -PathType Container)) { throw "driver folder DRIVER_DIR not found: $DRIVER_DIR" }
     if ($DRIVER_CERT -and -not (Test-Path $DRIVER_CERT)) { throw "DRIVER_CERT not found: $DRIVER_CERT" }
     $drvDir = $DRIVER_DIR
+    # viogpu is the Microsoft-signed Red Hat VirtIO GPU DOD controller. It must NOT be
+    # DISM-injected: a display driver installed during the specialize PnP pass made Windows
+    # Setup reboot before the Unattend action, leaving the image in a setup loop. Instead it
+    # is staged to C:\DroidVM\viogpu and installed at first logon (unattend order 5).
     $instShow = if ($DRIVER_INSTALL) { $DRIVER_INSTALL } else { "(all)" }
     $certShow = if ($DRIVER_CERT) { Split-Path $DRIVER_CERT -Leaf } else { "(auto from .cat)" }
     Write-Host "[drivers] dir=$drvDir  install=$instShow  cert=$certShow"
@@ -440,11 +444,30 @@ exit
         $tiny11 = Join-Path $HERE "debloat-tiny11.ps1"
         if (Test-Path $tiny11) {
             $keepCjk = -not ($env:DROIDVM_KEEP_CJK -and $env:DROIDVM_KEEP_CJK -match '^(0|false|no|off)$')
+            # Tiny11 Original removes Edge/WebView2; this image keeps them by default because
+            # WebView2 is a dependency of desktop apps. DROIDVM_KEEP_EDGE=0 restores Tiny11 behavior.
+            $keepEdge = -not ($env:DROIDVM_KEEP_EDGE -and $env:DROIDVM_KEEP_EDGE -match '^(0|false|no|off)$')
             $level = if ($env:DROIDVM_DEBLOAT_LEVEL) { $env:DROIDVM_DEBLOAT_LEVEL } else { 'standard' }
+            # Core-only extras requested for this image: Windows Update, Defender and recovery.
+            $coreExtras = -not ($env:DROIDVM_CORE_EXTRAS -and $env:DROIDVM_CORE_EXTRAS -match '^(0|false|no|off)$')
+            $tinyArgs = @{ MountDir = "$W\"; Level = $level; KeepCjk = $keepCjk; KeepEdge = $keepEdge }
+            if ($coreExtras) {
+                $tinyArgs.RemoveWindowsUpdate = $true
+                $tinyArgs.RemoveDefender = $true
+                $tinyArgs.RemoveRecovery = $true
+            }
             try {
-                & $tiny11 -MountDir "$W\" -Level $level -KeepCjk:$keepCjk
+                & $tiny11 @tinyArgs
             } catch {
                 Write-Host "  (tiny11 debloat failed, continuing: $($_.Exception.Message))" -ForegroundColor DarkYellow
+            }
+            # Cosmetic watermark removal: patch shell32.dll.mui strings after the servicing stack
+            # has applied the target update. This keeps testsigning (required by the test-signed
+            # VirtIO drivers) while removing the "Test Mode"/build-lab desktop watermark.
+            $watermark = Join-Path $HERE "patch-watermark.ps1"
+            if (Test-Path $watermark) {
+                try { & $watermark -MountDir "$W\" }
+                catch { Write-Host "  (watermark patch failed, continuing: $($_.Exception.Message))" -ForegroundColor DarkYellow }
             }
         } else {
             Write-Host "  (debloat-tiny11.ps1 not found; skipping debloat)" -ForegroundColor DarkYellow
@@ -523,6 +546,19 @@ exit
     $BCD = "$S\EFI\Microsoft\Boot\BCD"
     Invoke-ExternalCommand -FilePath "bcdedit" -ArgumentList @("/store", $BCD, "/set", "{default}", "testsigning", "on") -OutNull -What "bcdedit testsigning"
     Invoke-ExternalCommand -FilePath "bcdedit" -ArgumentList @("/store", $BCD, "/set", "{default}", "nointegritychecks", "on") -OutNull -What "bcdedit nointegritychecks"
+    # VBS/HVCI need the guest hypervisor; switch it off so the security features cannot start.
+    try {
+        Invoke-ExternalCommand -FilePath "bcdedit" -ArgumentList @("/store", $BCD, "/set", "{default}", "hypervisorlaunchtype", "off") -OutNull -What "bcdedit hypervisorlaunchtype"
+    } catch {
+        Write-Host "  (bcdedit hypervisorlaunchtype unsupported, continuing: $($_.Exception.Message))" -ForegroundColor DarkYellow
+    }
+    # Recovery is removed from the image by debloat-tiny11.ps1; stop the loader advertising it.
+    try {
+        Invoke-ExternalCommand -FilePath "bcdedit" -ArgumentList @("/store", $BCD, "/set", "{default}", "recoveryenabled", "No") -OutNull -What "bcdedit recoveryenabled"
+        Invoke-ExternalCommand -FilePath "bcdedit" -ArgumentList @("/store", $BCD, "/deletevalue", "{default}", "recoverysequence") -OutNull -What "bcdedit recoverysequence"
+    } catch {
+        Write-Host "  (recovery BCD cleanup skipped: $($_.Exception.Message))" -ForegroundColor DarkYellow
+    }
 
     # === 7b) Emergency Management Services (EMS/SAC over the SBSA UART) ===
     # Turns the guest into an out-of-band serial console (SAC> prompt) on the app's SBSA
@@ -575,6 +611,14 @@ exit
     # enable_windows_update.bat); the offline half ran in step 6. Mirrors macos/debloat.ps1.
     Copy-Item (Join-Path $HERE "debloat.ps1") "$stage\debloat.ps1" -Force
     Write-Host "[debloat] staged debloat.ps1 (first logon: telemetry / services / tasks / Windows Update off)"
+    # viogpu: stage the Microsoft-signed DOD driver for first-logon installation. Offline
+    # DISM injection made Setup's specialize PnP pass reboot before Unattend ran; installing
+    # after OOBE matches the old image, where Windows Update delivered the same driver later.
+    $viogpuSrc = Join-Path $HERE "extra-drivers\viogpu"
+    if (Test-Path $viogpuSrc -PathType Container) {
+        Copy-Item -LiteralPath $viogpuSrc -Destination "$stage\viogpu" -Recurse -Force
+        Write-Host "[viogpu] staged driver for first-logon pnputil install"
+    }
     # pvmpower devnode: pvmpower.sys binds to the root-enumerated ROOT\PVMPOWER, so the devnode must be created at first boot via SetupAPI
     # (INF/DISM injection does not create a devnode). Stage it if the driver zip has it, skip if not (older drivers lack pvmpower, which is normal).
     $pvmDevnode = Join-Path $zipRoot "pvmpower-devnode.ps1"

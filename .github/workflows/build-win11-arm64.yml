@@ -49,9 +49,17 @@ on:
         required: true
         default: 'zh-CN'
       debloat_level:
-        description: 'tiny11 debloat: standard (curated) | minimal (also strip other provisioned apps) | off'
+        description: 'tiny11 debloat: standard (Tiny11 Original) | minimal | off'
         required: true
         default: 'standard'
+      core_extras:
+        description: 'Also apply the Tiny11 Core extras: remove Windows Update, Defender and recovery (true/false)'
+        required: true
+        default: 'true'
+      keep_edge:
+        description: 'Keep Edge and WebView2 (true = Tiny11 edge-files not applied; false = remove them)'
+        required: true
+        default: 'true'
       keep_cjk:
         description: 'Preserve CJK fonts / IME / language features (true = Chinese works properly)'
         required: true
@@ -61,9 +69,9 @@ on:
         required: false
         default: ''
       ems_sac:
-        description: 'EMS/SAC console: skip | online (first boot pulls it from Windows Update)'
+        description: 'EMS/SAC console: skip | online (online needs Windows Update, which core_extras removes)'
         required: true
-        default: 'online'
+        default: 'skip'
       compress_qcow2:
         description: 'zstd-compress qcow2 clusters: 1 = smaller, 0 = plain'
         required: true
@@ -79,7 +87,7 @@ permissions:
 jobs:
   build:
     runs-on: ${{ github.event.inputs.runner }}
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     env:
       ISO_LANG:        ${{ github.event.inputs.iso_lang }}
@@ -90,6 +98,8 @@ jobs:
       DVM_PASSWORD:    ${{ github.event.inputs.dvm_password }}
       DROIDVM_LOCALE:  ${{ github.event.inputs.dvm_locale }}
       DROIDVM_DEBLOAT_LEVEL: ${{ github.event.inputs.debloat_level }}
+      DROIDVM_CORE_EXTRAS: ${{ github.event.inputs.core_extras }}
+      DROIDVM_KEEP_EDGE: ${{ github.event.inputs.keep_edge }}
       DROIDVM_KEEP_CJK: ${{ github.event.inputs.keep_cjk }}
       SSH_PUBKEY:      ${{ github.event.inputs.ssh_pubkey }}
       EMS_SAC_SOURCE:  ${{ github.event.inputs.ems_sac }}
@@ -222,14 +232,14 @@ jobs:
           New-Item -ItemType Directory -Force $out,$scratch | Out-Null
           $env:TEMP = $scratch
           $env:TMP = $scratch
-          $env:OUT_QCOW  = Join-Path $out 'win11-pro-26h2-26300.9550-arm64-droidvm.qcow2'
+          $env:OUT_QCOW  = Join-Path $out 'win11-pro-26h2-26300.9818-arm64-droidvm.qcow2'
           $env:IMAGE_METADATA_PATH = Join-Path $out 'image-metadata.json'
-          $env:OUT_VMPKG = Join-Path $out 'win11-pro-26h2-26300.9550-arm64-droidvm.vmpkg'
+          $env:OUT_VMPKG = Join-Path $out 'win11-pro-26h2-26300.9818-arm64-droidvm.vmpkg'
           $env:VMS_JSON  = "$env:GITHUB_WORKSPACE\vms.json"
           # DROIDVM_DEBLOAT=off skips the tiny11 pass entirely.
           if ($env:DROIDVM_DEBLOAT_LEVEL -eq 'off') { $env:DROIDVM_DEBLOAT = '0' }
 
-          Write-Host "locale=$env:DROIDVM_LOCALE debloat=$env:DROIDVM_DEBLOAT_LEVEL keepCjk=$env:DROIDVM_KEEP_CJK"
+          Write-Host "locale=$env:DROIDVM_LOCALE debloat=$env:DROIDVM_DEBLOAT_LEVEL coreExtras=$env:DROIDVM_CORE_EXTRAS keepCjk=$env:DROIDVM_KEEP_CJK"
           & "$env:GITHUB_WORKSPACE\windows\build.ps1"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited $LASTEXITCODE" }
 
@@ -267,7 +277,7 @@ jobs:
         run: |
           $parts = Join-Path $env:WORK_ROOT 'parts'
           $meta = Get-Content (Join-Path $parts 'image-metadata.json') -Raw | ConvertFrom-Json
-          if ($meta.edition_id -ne 'Professional' -or $meta.display_version -ne '26H2' -or $meta.target_build -ne '26300.9550') { throw 'Unexpected release metadata' }
+          if ($meta.edition_id -ne 'Professional' -or $meta.display_version -ne '26H2' -or $meta.target_build -ne '26300.9818') { throw 'Unexpected release metadata' }
           $tag = "win11-pro-$($meta.display_version)-$($meta.target_build)-arm64-$env:GITHUB_RUN_ID"
           $files = @(Get-ChildItem -LiteralPath $parts | ForEach-Object { $_.FullName })
           $notes = @"
@@ -275,11 +285,12 @@ jobs:
 
           - Source: official Microsoft ARM64 ISO ($env:ISO_LANG); selected by EditionID Professional, not localized edition names.
           - $($meta.kb) ARM64 is integrated offline and its SHA256 is checked against Microsoft Update Catalog.
-          - Offline registry build: $($meta.build); update pending first boot: $($meta.update_pending_first_boot). See image-metadata.json for package state. This is not yet a device-tested Pro release.
-          - Chinese locale: $env:DROIDVM_LOCALE; tiny11-style debloat: $env:DROIDVM_DEBLOAT_LEVEL; preserve CJK fonts/IME: $env:DROIDVM_KEEP_CJK.
+          - Offline registry build: $($meta.build); update pending first boot: $($meta.update_pending_first_boot). See image-metadata.json for package state.
+          - Tiny11 Original removal set: bundled-app options, OneDrive setup binaries, XPS, Work Folders, legacy IE and Recall; Chinese language features/IME/fonts are preserved. Edge/WebView2 are kept by default ($env:DROIDVM_KEEP_EDGE) because WebView2 is an app dependency.
+          - Core extras: Windows Update, Defender and WinRE removed/disabled. Memory compression: the MMAgent default is verified at first logon and enabled only if off (the Sysmain StoreParameters registry store is internal and undocumented). VBS/HVCI/Credential Guard: documented registry values (EnableVirtualizationBasedSecurity=0, HVCI Enabled=0, LsaCfgFlags=0) plus BCD hypervisorlaunchtype=off.
+          - The Test Mode/build-lab desktop watermark is blanked in shell32.dll.mui. testsigning remains ON: viostor/vioscsi/netkvm/pvmpower/rdmapool/viofs/viosnd are signed by CN=DroidVM Test, so testsigning off makes the image unbootable (verified). Only properly signed replacement drivers or attestation signing can turn it off.
           - Modified DroidVM drivers, test signing, unattended local account and staged SSH/RDP setup; no Windows license or activation is included.
-          - K70 Pro template: 2 CPUs, 1792 MiB RAM, 256 MiB DMA pool, hugepages on, prepare_lend_mthp disabled, SimpleFB native 1280x720/30Hz, VirtIO GPU and USB off, no NIC. The previous Home 26300.9457 image booted with this configuration; this Pro image still needs first-boot validation.
-          - Reassemble each format in its own directory with scripts/join-files.ps1, verify SHA256, then import the .vmpkg in DroidVM. Use C:\DroidVM\verify-image.ps1 after boot to check Professional / 26H2 / 26300.9550.
+          - Reassemble each format in its own directory with scripts/join-files.ps1, verify SHA256, then import the .vmpkg in DroidVM. Use C:\DroidVM\verify-image.ps1 after boot to check Professional / 26H2 / 26300.9818.
           - Default account USER / DroidVM: change the password before enabling a network. Networking, USB, audio and long-term stability are not verified.
           "@
           $notesFile = Join-Path $env:WORK_ROOT 'release-notes.md'

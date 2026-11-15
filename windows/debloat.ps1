@@ -1,22 +1,46 @@
 <#
-  debloat.ps1 - Route A's first-logon half of the debloat (runs on the TARGET as the created account).
+  debloat.ps1 - first-logon half of the cleanup (runs on the target as the created account).
 
-  build.ps1 already does the offline half on the mounted image: provisioned Appx removal, WinSxS
-  ResetBase, hibernate off, Reserved Storage off. What is left mirrors macos/debloat.ps1 steps 2-4
-  and 7 -- telemetry / ads, non-essential services, telemetry tasks, and Windows Update off with
-  enable_windows_update.bat dropped on this account's desktop (one-time, deliberately not in
-  C:\Users\Default so later accounts don't inherit it). Runs before setup-ems-sac.ps1, which
-  captures the WU state as its baseline and puts it back after an online FoD pull.
-  Failures are not fatal; continue as much as possible.
+  Offline work (build.ps1 + debloat-tiny11.ps1) already removed the Tiny11 apps,
+  OneDrive setup, optional features, Defender client package and WinRE, kept Edge/WebView2
+  (as requested), and wrote the Tiny11 privacy/consumer policies, VBS-off and WU-off values.
+
+  This script finishes the parts that need a running system:
+    - memory compression: verify the MMAgent default and enable only if it is off
+    - telemetry / non-essential services / telemetry tasks
+    - a state snapshot for verification (MMAgent, DeviceGuard, LsaCfgFlags, WU, Defender, WinRE)
+  Windows Update is deliberately not re-enabled: this image follows the Core behavior
+  requested for it. Failures are logged and never abort the logon.
 #>
 $ErrorActionPreference = 'SilentlyContinue'
-$log = 'C:\DroidVM\debloat.log'
+$logDir = 'C:\DroidVM'
+$log = Join-Path $logDir 'debloat.log'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 function Log([string]$m) { "{0}  {1}" -f (Get-Date -Format o), $m | Out-File -Append -Encoding utf8 $log }
 Log "start (as $(whoami))"
 
-# 1) Disable telemetry / ads / content push
+# 1) Memory compression.
+# Research note: the supported control surface is the MMAgent provider. Its state is kept in
+# Sysmain's internal StoreParameters store, not in a documented registry value; the offline
+# image has no explicit value there, and Windows 11 enables memory compression by default
+# (the previous image reported MemoryCompression=True). Verify first, enable only when off,
+# and record the observed state instead of blindly re-applying the screenshot command.
+try {
+    $mm = Get-MMAgent -ErrorAction Stop
+    if ($mm.MemoryCompression) {
+        Log "MemoryCompression already enabled (Windows default)"
+    } else {
+        Enable-MMAgent -MemoryCompression -ErrorAction Stop
+        Log "MemoryCompression was disabled; Enable-MMAgent -MemoryCompression applied"
+    }
+    Log ("Get-MMAgent.MemoryCompression=" + ((Get-MMAgent).MemoryCompression))
+} catch {
+    Log "MemoryCompression check/enable failed: $($_.Exception.Message)"
+}
+
+# 2) Disable telemetry / ads / content push (machine policies already set offline; keep idempotent)
 $telemetry = @{
-  'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' = @{ AllowTelemetry = 0 }
+  'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' = @{ AllowTelemetry = 1 }
   'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'   = @{ DisableWindowsConsumerFeatures = 1; DisableCloudOptimizedContent = 1 }
   'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AdvertisingInfo' = @{ Enabled = 0 }
 }
@@ -28,15 +52,15 @@ foreach ($path in $telemetry.Keys) {
 }
 Log "telemetry / ads policies set"
 
-# 2) Disable non-essential services (conservative: telemetry/diagnostics/Xbox/search indexing)
-$svc = 'DiagTrack','dmwappushservice','WSearch','XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc','MapsBroker','RetailDemo'
+# 3) Non-essential services (Windows Search is intentionally left alone: Tiny11 keeps local search)
+$svc = 'DiagTrack','dmwappushservice','XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc','MapsBroker','RetailDemo'
 foreach ($s in $svc) {
   Set-Service -Name $s -StartupType Disabled
   Stop-Service -Name $s -Force
 }
 Log "services disabled: $($svc -join ', ')"
 
-# 3) Disable scheduled telemetry tasks
+# 4) Telemetry scheduled tasks
 $tasks = '\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser',
          '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator',
          '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip',
@@ -45,31 +69,33 @@ $tasks = '\Microsoft\Windows\Application Experience\Microsoft Compatibility Appr
 foreach ($t in $tasks) { Disable-ScheduledTask -TaskPath (Split-Path $t) -TaskName (Split-Path $t -Leaf) | Out-Null }
 Log "telemetry tasks disabled"
 
-# 4) Disable Windows Update (including WaaSMedicSvc / UsoSvc, which auto-restart wuauserv), and place
-#    enable_windows_update.bat on this account's desktop so the user decides when to turn updates back on.
-# wuauserv is disabled via sc; WaaSMedicSvc is protected and can only be changed via the registry Start value (4=disabled)
-& sc.exe stop wuauserv | Out-Null
-& sc.exe config wuauserv start= disabled | Out-Null
-reg add "HKLM\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc" /v Start /t REG_DWORD /d 4 /f | Out-Null
-reg add "HKLM\SYSTEM\CurrentControlSet\Services\UsoSvc"       /v Start /t REG_DWORD /d 4 /f | Out-Null
-New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | Out-Null
-New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name NoAutoUpdate -Value 1 -PropertyType DWord -Force | Out-Null
-Log "Windows Update disabled"
+# 5) Windows Update: already disabled offline (services + policies). Do not place an enable .bat;
+#    this image follows the requested Core behavior. Log the actual service state.
+$wu = @(Get-Service wuauserv,UsoSvc,WaaSMedicSvc -ErrorAction SilentlyContinue |
+        ForEach-Object { "$($_.Name)=$($_.Status)/$($_.StartType)" }) -join ', '
+Log "Windows Update state: $wu"
 
-$enableBat = @'
-@echo off
->nul 2>&1 net session || (powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs" & exit /b)
-echo Re-enabling Windows Update...
-reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /f >nul 2>&1
-reg add "HKLM\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc" /v Start /t REG_DWORD /d 3 /f >nul
-reg add "HKLM\SYSTEM\CurrentControlSet\Services\UsoSvc"       /v Start /t REG_DWORD /d 2 /f >nul
-sc config wuauserv start= demand >nul
-sc start wuauserv >nul 2>&1
-echo Done. Windows Update re-enabled (a reboot is recommended).
-pause
-'@
-$desktop = Join-Path $env:USERPROFILE 'Desktop'   # the created account's desktop (FirstLogon runs as that account)
-New-Item -ItemType Directory -Force $desktop | Out-Null
-Set-Content -Path (Join-Path $desktop 'enable_windows_update.bat') -Value $enableBat -Encoding Ascii
-Log "enable_windows_update.bat placed on $desktop"
+# 6) State snapshot for the image verification step.
+$snap = Join-Path $logDir 'firstboot-state.txt'
+try {
+    "== MMAgent ==" | Out-File -Encoding utf8 $snap
+    Get-MMAgent | Out-File -Append -Encoding utf8 $snap
+    "== DeviceGuard ==" | Out-File -Append -Encoding utf8 $snap
+    Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard |
+        Select-Object VirtualizationBasedSecurityStatus, SecurityServicesRunning, SecurityServicesConfigured |
+        Format-List | Out-File -Append -Encoding utf8 $snap
+    "== LsaCfgFlags ==" | Out-File -Append -Encoding utf8 $snap
+    Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name LsaCfgFlags -ErrorAction SilentlyContinue |
+        Select-Object LsaCfgFlags | Format-List | Out-File -Append -Encoding utf8 $snap
+    "== Windows Update ==" | Out-File -Append -Encoding utf8 $snap
+    Get-Service wuauserv,UsoSvc,WaaSMedicSvc | Select-Object Name,Status,StartType |
+        Format-Table -AutoSize | Out-File -Append -Encoding utf8 $snap
+    "== Defender ==" | Out-File -Append -Encoding utf8 $snap
+    Get-MpComputerStatus | Select-Object AMServiceEnabled,RealTimeProtectionEnabled,AntivirusEnabled |
+        Format-List | Out-File -Append -Encoding utf8 $snap
+    "== Recovery ==" | Out-File -Append -Encoding utf8 $snap
+    reagentc /info | Out-File -Append -Encoding utf8 $snap
+} catch {
+    Log "state snapshot failed: $($_.Exception.Message)"
+}
 Log "done"

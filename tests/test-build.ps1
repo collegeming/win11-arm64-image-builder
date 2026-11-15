@@ -20,16 +20,16 @@ Assert-Throws { Select-ProImage -Images @($images[1], $images[1]) }
 $wrongArch = [pscustomobject]@{ImageIndex=3;ImageName='Pro x64';EditionId='Professional';Architecture=9}
 Assert-Throws { Select-ProImage -Images @($wrongArch) }
 
-$metadata = [pscustomobject]@{edition_id='Professional';display_version='26H2';build='26300.9550'}
-Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9550'
+$metadata = [pscustomobject]@{edition_id='Professional';display_version='26H2';build='26300.9818'}
+Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9818'
 $metadata.edition_id = 'Core'
-Assert-Throws { Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9550' }
+Assert-Throws { Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9818' }
 $metadata.edition_id = 'Professional'
 $metadata.build = '26300.9457'
-Assert-Throws { Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9550' }
-Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9550' -AllowPendingUpdate
+Assert-Throws { Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9818' }
+Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9818' -AllowPendingUpdate
 $metadata.build = '26100.9457'
-Assert-Throws { Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9550' -AllowPendingUpdate }
+Assert-Throws { Assert-ImageMetadata -Metadata $metadata -DisplayVersion '26H2' -Build '26300.9818' -AllowPendingUpdate }
 
 foreach ($file in Get-ChildItem $root -Filter *.ps1 -Recurse) {
     $tokens = $null

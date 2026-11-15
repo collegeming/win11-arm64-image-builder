@@ -144,6 +144,13 @@
           <Order>12</Order><Description>verify installed edition and update build</Description>
           <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -File C:\DroidVM\verify-image.ps1</CommandLine>
         </SynchronousCommand>
+        <!-- viogpu DOD: Microsoft-signed, staged by build.ps1 8c. It is installed HERE, after
+             OOBE, not by offline DISM: a display driver in the specialize PnP pass made Setup
+             reboot before Unattend was applied. pnputil failure must not block logon. -->
+        <SynchronousCommand wcm:action="add">
+          <Order>13</Order><Description>install Microsoft-signed viogpu DOD driver</Description>
+          <CommandLine>cmd /c if exist C:\DroidVM\viogpu\viogpudo.inf (pnputil /add-driver C:\DroidVM\viogpu\viogpudo.inf /install &amp; exit /b 0)</CommandLine>
+        </SynchronousCommand>
       </FirstLogonCommands>
     </component>
 
